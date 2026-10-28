@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>旅行足迹 Footprint</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🧭 旅行足迹</div>
+  </header>
+
+  <!-- 地图主区 -->
+  <div id="map-wrap">
+    <div id="map"></div>
+    <button id="btn-back-china" class="back-btn" hidden>← 返回全国</button>
+    <div id="map-legend" class="map-legend"></div>
+    <div id="map-hover-bar" class="map-hover-bar" hidden></div>
+  </div>
+
+  <!-- 左侧竖排工具栏 -->
+  <aside class="toolbar" id="toolbar">
+    <button class="tool-btn" data-drawer="entry" title="录入（行程/城市/交通段）">
+      <span class="ico">📝</span><span class="txt">录入</span>
+    </button>
+    <button class="tool-btn" data-drawer="timeline" title="时间线">
+      <span class="ico">🕒</span><span class="txt">时间线</span>
+    </button>
+    <button class="tool-btn" data-drawer="diary" title="心情日记">
+      <span class="ico">📔</span><span class="txt">日记</span>
+    </button>
+    <button class="tool-btn" id="btn-highlight" title="点亮模式（开关）">
+      <span class="ico">💡</span><span class="txt">点亮</span>
+    </button>
+    <button class="tool-btn" id="btn-theme" title="浅色 / 深色主题切换">
+      <span class="ico">☀️</span><span class="txt">主题</span>
+    </button>
+    <button class="tool-btn" data-drawer="settings" title="设置与备份">
+      <span class="ico">⚙️</span><span class="txt">设置</span>
+    </button>
+  </aside>
+
+  <!-- 右侧抽屉 -->
+  <!-- 录入抽屉 -->
+  <section id="drawer-entry" class="drawer">
+    <div class="drawer-head"><h2>📝 录入 / 列表</h2><button class="drawer-close" title="关闭">✕</button></div>
+    <div class="drawer-body">
+      <h3 class="card-title">新增行程 Trip</h3>
+      <div id="edit-banner-trip" class="edit-banner" hidden>正在编辑：<b id="edit-name-trip"></b><button type="button" class="small ghost" id="btn-edit-cancel-trip">取消编辑</button></div>
+      <form id="form-trip" class="card">
+        <label>标题 *<input name="title" required placeholder="如：广州—西安"></label>
+        <label>开始日期<input type="date" name="dateStart"></label>
+        <label>结束日期<input type="date" name="dateEnd"></label>
+        <label>备注<textarea name="note" rows="2" placeholder="可选"></textarea></label>
+        <button type="submit" class="primary" id="btn-save-trip">保存行程</button>
+      </form>
+
+      <h3 class="card-title">新增城市</h3>
+      <div id="edit-banner-stop" class="edit-banner" hidden>正在编辑：<b id="edit-name-stop"></b><button type="button" class="small ghost" id="btn-edit-cancel-stop">取消编辑</button></div>
+      <form id="form-stop" class="card">
+        <label>所属行程 *
+          <select name="tripId" required></select>
+        </label>
+        <div class="field">
+          <span class="field-label">城市（可搜索，选后自动回填省/市/经纬度）</span>
+          <div class="city-picker">
+            <input type="text" id="city-preset-input" placeholder="输入关键词，如：贵阳 / 贵州" autocomplete="off">
+            <div id="city-preset-list" class="city-preset-list" hidden></div>
+          </div>
+        </div>
+        <label>名称(中文) *<input name="nameZh" required placeholder="如：广州"></label>
+        <label>名称(英文，可空)<input name="nameEn" placeholder="Guangzhou"></label>
+        <label>圆点颜色
+          <input type="hidden" name="markerColor" value="#2E7D63">
+          <div class="swatch-row" id="stop-color-palette"></div>
+        </label>
+        <div class="row">
+          <label>国家<input name="country" value="中国"></label>
+          <label>省/地区<input name="region"></label>
+          <label>城市<input name="city"></label>
+        </div>
+        <div class="row">
+          <label>纬度 lat *<input name="lat" id="stop-lat" required type="number" step="any" placeholder="23.1291"></label>
+          <label>经度 lng *<input name="lng" id="stop-lng" required type="number" step="any" placeholder="113.2644"></label>
+        </div>
+        <div class="row">
+          <label>到达日期<input type="date" name="arriveDate"></label>
+          <label>离开日期<input type="date" name="leaveDate"></label>
+        </div>
+        <div class="row">
+          <label>天气<input name="weather" placeholder="晴"></label>
+          <label>心情<input name="mood" placeholder="开心"></label>
+          <label>花费<input name="cost" type="number" step="any" placeholder="0"></label>
+        </div>
+        <label>同行者<input name="companions" placeholder="可选，逗号分隔"></label>
+        <label>备注<textarea name="note" rows="2" placeholder="可选"></textarea></label>
+        <button type="submit" class="primary" id="btn-save-stop">保存城市</button>
+      </form>
+
+      <h3 class="card-title">新增交通段 Leg</h3>
+      <div id="edit-banner-leg" class="edit-banner" hidden>正在编辑：<b id="edit-name-leg"></b><button type="button" class="small ghost" id="btn-edit-cancel-leg">取消编辑</button></div>
+      <form id="form-leg" class="card">
+        <label>所属行程 *
+          <select name="tripId" required></select>
+        </label>
+        <div class="row">
+          <label>出发城市 *
+            <select name="fromStopId" required></select>
+          </label>
+          <label>到达城市 *
+            <select name="toStopId" required></select>
+          </label>
+        </div>
+        <div class="row leg-manual" id="leg-manual-from" hidden>
+          <label>出发城市名<input name="fromName" placeholder="直接输入城市名"></label>
+          <label>出发纬度<input name="fromLat" type="number" step="any" placeholder="可选"></label>
+          <label>出发经度<input name="fromLng" type="number" step="any" placeholder="可选"></label>
+        </div>
+        <div class="row leg-manual" id="leg-manual-to" hidden>
+          <label>到达城市名<input name="toName" placeholder="直接输入城市名"></label>
+          <label>到达纬度<input name="toLat" type="number" step="any" placeholder="可选"></label>
+          <label>到达经度<input name="toLng" type="number" step="any" placeholder="可选"></label>
+        </div>
+        <p class="hint">选「✍️ 手动输入城市…」可直接输入城市名；坐标可空，缺坐标的一端不画连线。</p>
+        <label>交通方式 *
+          <select name="mode" required>
+            <option value="plane">✈️ 飞机 plane</option>
+            <option value="highspeed">🚄 高铁/动车 highspeed（G、D 字头）</option>
+            <option value="train">🚞 普速火车 train（K、T、Z、纯数字）</option>
+            <option value="bus">🚌 大巴/汽车 bus</option>
+            <option value="boat">⛵ 轮船 boat</option>
+            <option value="car">🚗 自驾 car</option>
+          </select>
+        </label>
+        <div class="row">
+          <label>出发时间<input type="datetime-local" name="departAt"></label>
+          <label>到达时间<input type="datetime-local" name="arriveAt"></label>
+        </div>
+        <div class="row">
+          <label>花费<input name="cost" type="number" step="any" placeholder="0"></label>
+        </div>
+        <label>备注<textarea name="note" rows="2" placeholder="可选"></textarea></label>
+        <button type="submit" class="primary" id="btn-save-leg">保存交通段</button>
+      </form>
+
+      <h3 class="card-title">已有数据（可删除）</h3>
+      <div id="data-lists">
+        <h4 class="list-subtitle">行程 Trip</h4>
+        <div id="list-trips" class="list-block"></div>
+        <h4 class="list-subtitle">城市</h4>
+        <div id="list-stops" class="list-block"></div>
+        <h4 class="list-subtitle">交通段 Leg</h4>
+        <div id="list-legs" class="list-block"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 时间线抽屉 -->
+  <section id="drawer-timeline" class="drawer">
+    <div class="drawer-head"><h2>🕒 时间线</h2><button class="drawer-close" title="关闭">✕</button></div>
+    <div class="drawer-body">
+      <div id="timeline"></div>
+    </div>
+  </section>
+
+  <!-- 心情日记抽屉 -->
+  <section id="drawer-diary" class="drawer">
+    <div class="drawer-head"><h2>📔 心情日记</h2><button class="drawer-close" title="关闭">✕</button></div>
+    <div class="drawer-body">
+      <form id="form-diary" class="card">
+        <label>日期 *<input type="date" name="date" required></label>
+        <div class="mood-row">
+          <label class="mood-opt"><input type="radio" name="mood" value="😊开心" checked><span>😊 开心</span></label>
+          <label class="mood-opt"><input type="radio" name="mood" value="😴疲惫"><span>😴 疲惫</span></label>
+          <label class="mood-opt"><input type="radio" name="mood" value="🤩惊喜"><span>🤩 惊喜</span></label>
+          <label class="mood-opt"><input type="radio" name="mood" value="🌿治愈"><span>🌿 治愈</span></label>
+          <label class="mood-opt"><input type="radio" name="mood" value="😢低落"><span>😢 低落</span></label>
+          <label class="mood-opt"><input type="radio" name="mood" value="😌平静"><span>😌 平静</span></label>
+        </div>
+        <label>天气<input name="weather" placeholder="晴 / 多云 / 小雨…"></label>
+        <label>碎碎念<textarea name="note" rows="4" placeholder="今天的心情与见闻…"></textarea></label>
+        <div class="row">
+          <label>关联行程<select name="tripId"></select></label>
+          <label>关联城市<select name="stopId"></select></label>
+        </div>
+        <button type="submit" class="primary">保存日记</button>
+        <button type="button" id="btn-diary-cancel" class="ghost" hidden>取消编辑</button>
+      </form>
+      <h3 class="card-title">日记列表（按日期倒序）</h3>
+      <div id="diary-list"></div>
+    </div>
+  </section>
+
+  <!-- 设置抽屉 -->
+  <section id="drawer-settings" class="drawer">
+    <div class="drawer-head"><h2>⚙️ 设置与备份</h2><button class="drawer-close" title="关闭">✕</button></div>
+    <div class="drawer-body">
+      <div class="card settings-card">
+        <p>所有数据保存在本浏览器 IndexedDB，刷新不丢失。导出/导入包含行程、城市、交通段、点亮状态与心情日记。</p>
+        <form id="form-home-city" class="home-city-form">
+          <span class="field-label">常驻城市（交通段下拉置顶项，不占用城市列表）</span>
+          <label>名称<input name="name" placeholder="如：广州"></label>
+          <div class="row">
+            <label>纬度 lat<input name="lat" type="number" step="any"></label>
+            <label>经度 lng<input name="lng" type="number" step="any"></label>
+          </div>
+          <button type="submit" class="primary">保存常驻城市</button>
+        </form>
+        <div class="settings-actions">
+          <button id="btn-export" class="primary">导出全部 JSON</button>
+          <label class="file-btn primary">
+            从 JSON 导入
+            <input type="file" id="file-import" accept="application/json,.json" hidden>
+          </label>
+          <button id="btn-clear" class="danger">清空全部数据</button>
+        </div>
+        <p class="hint">清空操作需二次确认，导入将覆盖现有数据。</p>
+        <p class="hint">地图操作：左键拖拽平移；键盘 W/A/S/D 或方向键平移；双击省份进入省内地图。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 照片抽屉 -->
+  <section id="drawer-photos" class="drawer">
+    <div class="drawer-head"><h2 id="photo-drawer-title">📷 城市照片</h2><button id="photos-close" class="drawer-close" title="关闭照片抽屉" aria-label="关闭照片抽屉">✕</button></div>
+    <div class="drawer-body">
+      <div class="photo-toolbar">
+        <label class="file-btn primary">添加照片
+          <input type="file" id="photo-input" accept="image/*" multiple hidden>
+        </label>
+        <span class="hint">自动压缩：长边 1600px / JPEG 0.8，仅存本机</span>
+      </div>
+      <div id="photo-empty" class="empty" hidden>该城市还没有照片</div>
+      <div id="photo-grid" class="photo-grid"></div>
+    </div>
+  </section>
+
+  <!-- 大图查看层（lightbox） -->
+  <div id="photo-lightbox" class="lightbox">
+    <div class="lightbox-inner">
+      <div class="lb-head"><b>查看照片</b><button id="lb-close" class="drawer-close" title="关闭">✕</button></div>
+      <img id="lb-img" alt="照片大图">
+      <div class="lb-form">
+        <label>拍摄日期<input type="date" id="lb-shootDate"></label>
+        <label>拍摄者<input id="lb-author" placeholder="如：妈妈拍的 / 路人帮忙（可空）"></label>
+        <label>说明文字<textarea id="lb-caption" rows="3" placeholder="当时发生了什么、心情或备注…"></textarea></label>
+        <div class="lb-actions">
+          <button id="lb-save" class="primary">保存注释</button>
+          <button id="lb-setcover" class="ghost">设为封面</button>
+          <button id="lb-unsetcover" class="ghost" hidden>取消封面</button>
+          <button id="lb-delete" class="danger">删除照片</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 照片轮播层（双击封面气泡打开） -->
+  <div id="photo-carousel" class="carousel">
+    <div class="carousel-inner">
+      <button id="pc-close" class="drawer-close" title="关闭">✕</button>
+      <div class="pc-stage">
+        <button id="pc-prev" class="pc-arrow" title="上一张">‹</button>
+        <img id="pc-img" alt="照片大图">
+        <button id="pc-next" class="pc-arrow" title="下一张">›</button>
+      </div>
+      <div class="pc-caption" id="pc-caption"></div>
+      <div class="pc-thumbs" id="pc-thumbs"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="data/china-provinces.js"></script>
+  <script src="data/cities.js"></script>
+  <script src="js/db.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

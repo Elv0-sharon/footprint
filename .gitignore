@@ -1,0 +1,11 @@
+# macOS
+.DS_Store
+
+# 依赖
+node_modules/
+
+# 临时检查/构建脚本（不进入正式仓库）
+_check*.js
+_audit*.js
+_verify*.js
+_build*.js
