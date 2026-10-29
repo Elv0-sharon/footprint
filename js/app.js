@@ -788,16 +788,42 @@ function refreshSelects() {
   const stopOptions = STOPS.map(s => `<option value="${s.id}">${esc(s.nameZh)}（${esc(s.city || s.region || '?')}）</option>`).join('');
 
   const tripReq = tripOptions || '<option value="" disabled>请先添加行程</option>';
+  // 重新灌选项时保留当前选中行程：编辑既有交通段/城市时，后台 reload 不能把表单打回第一个行程；
+  // 原行程/城市已删除时也保留原 id，避免编辑时被静默改到别的行程。
   document.querySelectorAll('#form-stop select[name="tripId"], #form-leg select[name="tripId"]')
-    .forEach(s => s.innerHTML = tripReq);
+    .forEach(s => {
+      const prev = s.value;
+      s.innerHTML = tripReq;
+      if (prev && s.querySelector(`option[value="${prev}"]`)) s.value = prev;
+      else if (prev) {
+        const o = document.createElement('option');
+        o.value = prev;
+        o.textContent = '（原行程已删除）';
+        s.appendChild(o);
+        s.value = prev;
+      }
+    });
 
   // Leg 起止城市下拉：常驻城市置顶 + 全部已有城市（跨行程）+ 手动输入兜底
   const legOpts = legCityOptions();
+  const edLeg = _editingLegId ? LEGS.find(l => l.id === _editingLegId) : null;
   document.querySelectorAll('#form-leg select[name="fromStopId"], #form-leg select[name="toStopId"]')
     .forEach(s => {
       const prev = s.value;
+      const end = s.name === 'fromStopId' ? 'from' : 'to';
+      const raw = edLeg && edLeg[end];
       s.innerHTML = legOpts;
       if (prev && s.querySelector(`option[value="${prev}"]`)) s.value = prev;   // 仍有效则保留已选
+      else if (prev && prev !== 'home' && prev !== '__manual') {
+        // 编辑的段引用了已删除的城市：保留原 stopId，别回退成别的城市/空白手动输入
+        const nm = (raw && raw.name) || (edLeg && edLeg[end + 'Name']) || '';
+        const o = document.createElement('option');
+        o.value = prev;
+        o.dataset.name = nm;
+        o.textContent = nm ? `（城市已删除：${nm}）` : '（城市已删除）';
+        s.appendChild(o);
+        s.value = prev;
+      }
     });
 
   const dTrip = document.querySelector('#form-diary select[name="tripId"]');
@@ -836,7 +862,9 @@ function legFormEndpoint(f, end) {
     const lat = f[end + 'Lat'].value, lng = f[end + 'Lng'].value;
     return { kind: 'custom', name, lat: lat === '' ? null : Number(lat), lng: lng === '' ? null : Number(lng) };
   }
-  return v ? { kind: 'stop', stopId: v, name: (stopById(v) || {}).nameZh || v } : null;
+  if (!v) return null;
+  const opt = f[end + 'StopId'].selectedOptions && f[end + 'StopId'].selectedOptions[0];
+  return { kind: 'stop', stopId: v, name: (stopById(v) || {}).nameZh || (opt && opt.dataset.name) || v };
 }
 function resetLegForm() {
   _editingLegId = null;
@@ -1032,7 +1060,22 @@ function startEditLeg(id) {
   const l = LEGS.find(x => x.id === id); if (!l) return;
   _editingLegId = id;
   const f = document.getElementById('form-leg');
-  f.tripId.value = l.tripId || '';
+  const tripId = l.tripId || '';
+  if (!tripId) {
+    if (!f.tripId.querySelector('option[value=""]')) {
+      const o = document.createElement('option');
+      o.value = '';
+      o.textContent = '（未归属行程）';
+      f.tripId.appendChild(o);
+    }
+  } else if (!f.tripId.querySelector(`option[value="${tripId}"]`)) {
+    // 原行程已删除：保留原 tripId，编辑保存时不会被改到第一个行程
+    const o = document.createElement('option');
+    o.value = tripId;
+    o.textContent = '（原行程已删除）';
+    f.tripId.appendChild(o);
+  }
+  f.tripId.value = tripId;
   const opts = legCityOptions();   // 编辑回填：先灌选项再按端点类型选值
   f.fromStopId.innerHTML = opts;
   f.toStopId.innerHTML = opts;
@@ -1052,8 +1095,20 @@ function startEditLeg(id) {
       f[end + 'Lng'].value = (e.lng == null ? '' : e.lng);
     } else {
       const sid = (e && e.kind === 'stop') ? e.stopId : l[end + 'StopId'];   // 旧结构兼容
-      if (sid && sel.querySelector(`option[value="${sid}"]`)) sel.value = sid;
-      else sel.value = '__manual';   // 站点已被删除：回退手动输入补填
+      if (sid && sel.querySelector(`option[value="${sid}"]`)) {
+        sel.value = sid;
+      } else if (sid) {
+        // 站点已被删除：保留原 stopId，显示为“已删除城市”，不要静默换成别的城市
+        const nm = (e && e.name) || l[end + 'Name'] || '';
+        const o = document.createElement('option');
+        o.value = sid;
+        o.dataset.name = nm;
+        o.textContent = nm ? `（城市已删除：${nm}）` : '（城市已删除）';
+        sel.appendChild(o);
+        sel.value = sid;
+      } else {
+        sel.value = '__manual';   // 旧数据没有站点 id：手动补填
+      }
     }
   });
   updateLegManualVisibility();
