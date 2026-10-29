@@ -388,6 +388,12 @@ button.small.ghost:hover { background: var(--btn-hover); }
   border: 2px solid #fff; box-shadow: var(--shadow);
   flex: 0 0 auto; margin-top: 2px; cursor: pointer;
 }
+/* 常驻城市 🏠 圆点：白底房子图标，与普通城市点区分 */
+.fp-dot-home {
+  display: flex; align-items: center; justify-content: center;
+  background: #fff; border-color: #8a5a2b;
+  font-size: 9px; line-height: 1;
+}
 
 /* 轮播顶部标题（城市名 + 日期） */
 .pc-title {

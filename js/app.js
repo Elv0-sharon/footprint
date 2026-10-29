@@ -420,6 +420,24 @@ function renderMap() {
     marker.addTo(layerGroup);
     _stopMarkers.set(s.id, marker);
   });
+  // 常驻城市：自动生成一个 🏠 标记点，像普通城市一样可点击（与已有城市点重合时不重复画）
+  if (HOME_CITY && HOME_CITY.lat != null && HOME_CITY.lng != null) {
+    const dup = STOPS.some(s =>
+      (s.nameZh || '').trim() === (HOME_CITY.name || '').trim()
+      || (Math.abs(Number(s.lat) - Number(HOME_CITY.lat)) < 0.05 && Math.abs(Number(s.lng) - Number(HOME_CITY.lng)) < 0.05));
+    if (!dup) {
+      const marker = L.marker([Number(HOME_CITY.lat), Number(HOME_CITY.lng)], {
+        icon: L.divIcon({
+          className: 'fp-marker-icon',
+          html: `<div class="fp-marker"><div class="fp-dot fp-dot-home" title="常驻城市">🏠</div></div>`,
+          iconSize: [56, 16], iconAnchor: [28, 15],
+        }),
+        keyboard: false,
+      });
+      marker.bindPopup(`<b>🏠 ${esc(HOME_CITY.name || '常驻城市')}</b><br>📍 常驻地（在「设置 → 常驻城市」中修改）`);
+      marker.addTo(layerGroup);
+    }
+  }
 }
 
 // 弹窗内容函数化：每次打开都取最新的日记摘要、照片数与颜色选中态
