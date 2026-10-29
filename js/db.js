@@ -123,12 +123,19 @@ const DB = {
   delPhoto: (id) => _del('photos', id),
   getAllPhotos: () => _getAll('photos'),   // 云端同步用：全量本地照片（含 blob）
 
-  // 用户主动"清空全部数据"：连照片一起清
-  clearAll: () => _clear('trips')
-    .then(() => _clear('stops')).then(() => _clear('legs'))
-    .then(() => _clear('diaries'))
-    .then(() => _clear('visitedProvinces')).then(() => _clear('visitedCities'))
-    .then(() => _clear('photos')),
+  // 用户主动"清空全部数据"：连照片一起清；登录状态同时清空云端，防止刷新/重登后被同步回来
+  clearAll: async () => {
+    if (window.SBCloud && window._sbUser) {
+      try {
+        await SBCloud.clearPhotos();   // 云端照片（元数据+Storage）先清，避免双向同步回填
+        await SBCloud.clearAll();      // 云端五表
+      } catch (e) { console.warn('[footprint] 云端清空失败：', e); }
+    }
+    await _clear('trips'); await _clear('stops'); await _clear('legs');
+    await _clear('diaries'); await _clear('wishlist');
+    await _clear('visitedProvinces'); await _clear('visitedCities');
+    await _clear('photos');
+  },
 
   // JSON 导出只含文字数据，不含照片 Blob
   exportAll: async () => ({

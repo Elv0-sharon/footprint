@@ -96,13 +96,22 @@ const SBCloud = {
   getWishlist() { return this.wishlist.getAll(); },
   putWish(w) { return this.wishlist.put(w); },
   delWish(id) { return this.wishlist.del(id); },
-  // JSON 导入：清空当前用户五表后逐条写入（照片/点亮/配置走本地）
-  async importAll(data) {
+  // 清空当前用户云端五表（"清空全部数据"时与本地一起清，防止刷新后被拉回来）
+  async clearAll() {
     const uid = await requireUser();
     for (const table of ['trips', 'stops', 'legs', 'diaries', 'wishlist']) {
       const { error } = await authRetry(() => sb.from(table).delete().eq('user_id', uid));
       if (error) throw error;
     }
+  },
+  // 清空当前用户云端全部照片（元数据 + Storage 文件）
+  async clearPhotos() {
+    const uid = await requireUser();
+    await SBPhotos.clearAll(uid);
+  },
+  // JSON 导入：清空当前用户五表后逐条写入（照片/点亮/配置走本地）
+  async importAll(data) {
+    await this.clearAll();
     for (const t of (data.trips || [])) await this.trips.put(t);
     for (const s of (data.stops || [])) await this.stops.put(s);
     for (const l of (data.legs || [])) await this.legs.put(l);
@@ -147,6 +156,16 @@ const SBPhotos = {
     const { data } = sb.storage.from('photos').getPublicUrl(storagePath);
     return data ? data.publicUrl : null;
   },
+  // 清空当前用户全部云端照片（元数据 + Storage 文件），"清空全部数据"时调用
+  async clearAll(uid) {
+    const meta = await this.listMeta(uid);          // 失败会抛出，由调用方处理
+    for (const m of meta) {
+      try { await sb.storage.from('photos').remove([m.storagePath]); }
+      catch (e) { console.warn('[footprint] 云端照片文件删除失败：', m.id, e); }
+    }
+    const { error } = await authRetry(() => sb.from('photos').delete().eq('user_id', uid));
+    if (error) throw error;
+  },
 };
 
 // 单张照片镜像到云端（上传/编辑注释后调用；失败不打断本地流程，登录时会自动补同步）
@@ -180,14 +199,23 @@ window.syncAllPhotos = async function () {
   let up = 0, down = 0, fail = 0;
   for (const p of localAll) {                       // 上传：本地有、云端没有
     if (cloudIds.has(p.id)) continue;
-    try { await SBPhotos.uploadBlob(p, p.blob, uid); await SBPhotos.upsertMeta(p, uid); up++; }
+    try { await authRetry(() => SBPhotos.uploadBlob(p, p.blob, uid)); await authRetry(() => SBPhotos.upsertMeta(p, uid)); up++; }
     catch (e) { console.warn('[footprint] 照片上传失败：', p.id, e); fail++; }
   }
   for (const c of cloud) {                          // 下载：云端有、本地没有
     if (localIds.has(c.id)) continue;
     try {
-      const resp = await fetch(SBPhotos.publicUrl(c.storagePath));
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      let resp = null, lastErr = null;
+      for (let i = 0; i < 3; i++) {                 // 公网 URL 偶发抖动，重试 3 次
+        try {
+          resp = await fetch(SBPhotos.publicUrl(c.storagePath));
+          if (resp.ok) break;
+          lastErr = new Error('HTTP ' + resp.status);
+        } catch (e) { lastErr = e; }
+        resp = null;
+        await new Promise(r => setTimeout(r, 600 * (i + 1)));
+      }
+      if (!resp) throw (lastErr || new Error('下载失败'));
       const blob = await resp.blob();
       await DB.putPhoto({ id: c.id, stopId: c.stopId, blob, caption: c.caption, shootDate: c.shootDate, author: c.author, createdAt: c.createdAt });
       down++;

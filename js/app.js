@@ -2547,7 +2547,7 @@ function bindSettings() {
   await window._authReady;          // supabase.js：会话恢复完成（游客不等待登录）
   await window.startApp();
   if (window._sbUser) window.syncAllPhotos().then(r => {   // 启动时已登录：补一次照片双向同步
-    if (r.up || r.down) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张` : ''));
+    if (r.up || r.down || r.fail) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张（下次登录自动补传）` : ''));
   }).catch(e => console.warn('[footprint] 照片同步失败：', e));
   // 登录成功后（supabase.js SIGNED_IN 事件调用）：从云端重载五类数据并整体刷新
   window.onSignedIn = async function () {
@@ -2556,7 +2556,7 @@ function bindSettings() {
       await window.startApp();
       toast('已登录，数据已切换为云端同步');
       const r = await window.syncAllPhotos();
-      if (r.up || r.down) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张` : ''));
+      if (r.up || r.down || r.fail) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张（下次登录自动补传）` : ''));
     } catch (err) {
       console.error(err);
       toast('云端数据加载失败：' + err.message);
