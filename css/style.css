@@ -480,20 +480,24 @@ body.auth-lock > *:not(#auth-screen) { display: none !important; }
   animation: playPop .3s ease;   /* 城市到达 0.3s 缩放淡入 */
 }
 @keyframes playPop { from { transform: scale(.3); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-/* 光点：白描边 + 交通方式色填充，沿路径前进，到达后淡出 */
+/* 光点：白描边 + 交通方式色填充 + 光晕，沿路径连续前进，到达后淡出 */
 .play-runner-icon { background: transparent; border: none; }
 .play-runner {
   width: 14px; height: 14px; border-radius: 50%;
-  border: 3px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.4);
+  border: 3px solid #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,.4), 0 0 12px 3px rgba(255,255,255,.55);
   transition: opacity .6s ease;
 }
 .play-runner.play-fade { opacity: 0; }
+@keyframes playFadeIn { from { opacity: 0; } to { opacity: 1; } }
 .play-label {
   position: absolute; bottom: 26px; left: 50%; transform: translateX(-50%);
   white-space: nowrap; font-size: 12px; font-weight: 600;
   background: var(--card); color: var(--text); border: 1px solid var(--border);
   border-radius: 8px; padding: 3px 8px; box-shadow: var(--shadow);
+  animation: playFadeIn .3s ease both;   /* 与城市标记同步淡入 */
 }
+.play-arrow-in { animation: playFadeIn .4s ease both; }   /* 段生长完成后箭头淡入 */
 @media (max-width: 480px) {
   .play-bar { bottom: 8px; padding: 6px 8px; gap: 6px; }
   .play-btn { padding: 6px 8px; font-size: 12px; }

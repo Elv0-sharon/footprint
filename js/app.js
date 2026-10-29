@@ -1223,8 +1223,11 @@ function bindWish() {
   });
 }
 
-/* ===== 轨迹播放 ===== */
+/* ===== 轨迹播放（mult.dev 手感：单一 rAF 主循环 + 全局时间轴 + 相机连续跟随） ===== */
 let _playGroup = null, _play = null;
+const SEG_MS = 2500, DWELL_MS = 1000, END_MS = 1800, INTRO_MS = 1200;   // 段生长/城市停留/收尾/开场
+const easeInOutCubic = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+const lerp = (a, b, t) => a + (b - a) * t;
 // 播放顺序：行程内城市按到达日期升序，无日期按录入顺序排最后
 function playSequence(tripId) {
   return STOPS.filter(s => s.tripId === tripId)
@@ -1239,20 +1242,28 @@ function legBetween(prevId, curId) {
     return (f === prevId && t === curId) || (f === curId && t === prevId);
   });
 }
-// 播放等待：speed 加速、暂停冻结、退出立即返回（rAF 驱动，不阻塞）
-function playWait(ms) {
-  return new Promise(resolve => {
-    const st = _play;
-    let acc = 0, last = performance.now();
-    function tick(now) {
-      if (!st || !st.running) return resolve();
-      if (!st.paused) acc += (now - last) * st.speed;
-      last = now;
-      if (acc >= ms) return resolve();
-      requestAnimationFrame(tick);
-    }
-    requestAnimationFrame(tick);
-  });
+// 路径参数取点：t∈[0,1] → 坐标（段内线性插值，t 本身经 easeInOutCubic 缓动）
+function pathPoint(pts, t) {
+  const fi = t * (pts.length - 1), i0 = Math.floor(fi), frac = fi - i0;
+  if (i0 >= pts.length - 1) return pts[pts.length - 1];
+  return [pts[i0][0] + (pts[i0 + 1][0] - pts[i0][0]) * frac, pts[i0][1] + (pts[i0 + 1][1] - pts[i0][1]) * frac];
+}
+// 全局时间轴：开场飞向首城 → 每段「线生长+光点」→ 每城停留 → 收尾拉回全国
+function buildTimeline(n) {
+  const phases = []; let t = 0;
+  phases.push({ type: 'intro', i: 0, start: 0, end: t += INTRO_MS });
+  phases.push({ type: 'city', i: 0, start: t, end: t += DWELL_MS });
+  for (let i = 1; i < n; i++) {
+    phases.push({ type: 'seg', i, start: t, end: t += SEG_MS });
+    phases.push({ type: 'city', i, start: t, end: t += DWELL_MS });
+  }
+  phases.push({ type: 'end', start: t, end: t += END_MS });
+  return { phases, total: t };
+}
+// 相机帧驱动：中心/缩放一步到位（zoomSnap 已在播放期置 0，支持连续缩放）
+function playCamera(latlng, zoom) {
+  map.setView(latlng, zoom, { animate: false });
+  _play.zoom = zoom;
 }
 // 线段 0%→100% 逐段绘制动画
 // 播放前预读：把行程城市、每段 Leg 的完整路径点一次性构建进内存，播放中零数据查询
@@ -1262,15 +1273,16 @@ function buildSegments(seq) {
     const leg = legBetween(seq[i - 1].id, seq[i].id);
     const st = legStyle(leg ? leg.mode : 'train');
     const A = [seq[i - 1].lat, seq[i - 1].lng], B = [seq[i].lat, seq[i].lng];
-    let pts;
+    let pts, ctrl = null;
     if (leg && leg.mode === 'plane') {
-      pts = planeCurve(A, B, curveCtrl(A, B));                 // 弧线按贝塞尔参数取点
+      ctrl = curveCtrl(A, B);
+      pts = planeCurve(A, B, ctrl);                            // 弧线按贝塞尔参数取点
     } else {
       pts = [];
       const N = 24;                                            // 直线线性插值
       for (let k = 0; k <= N; k++) pts.push([A[0] + (B[0] - A[0]) * k / N, A[1] + (B[1] - A[1]) * k / N]);
     }
-    segs.push({ hasLeg: !!leg, pts, color: st.color, from: A, to: B });
+    segs.push({ hasLeg: !!leg, pts, color: st.color, from: A, to: B, ctrl });
   }
   return segs;
 }
@@ -1283,41 +1295,91 @@ function playZoomFor(prev, cur) {
   if (d < 8) return 10;
   return 9;
 }
-// 路线生长动画：Polyline 逐点加入 + 光点沿路径同步前进（rAF 驱动，暂停冻结）
-function animateSegment(seg) {
-  return new Promise(resolve => {
-    const st = _play;
-    const pts = seg.pts;
-    const line = L.polyline([pts[0]], { color: seg.color, weight: 2, opacity: 0.9 }).addTo(_playGroup);
-    const runner = L.marker(pts[0], {
-      icon: L.divIcon({
-        className: 'play-runner-icon', iconSize: [14, 14], iconAnchor: [7, 7],
-        html: `<div class="play-runner" style="background:${seg.color}"></div>`,
-      }),
-      interactive: false,
-    }).addTo(_playGroup);
-    let acc = 0, last = performance.now();
-    function tick(now) {
-      if (!st || !st.running) return resolve();
-      if (!st.paused) acc += (now - last) * st.speed;
-      last = now;
-      const t = Math.min(1, acc / 1000);
-      const fi = t * (pts.length - 1);
-      const i0 = Math.floor(fi), frac = fi - i0;
-      const head = i0 >= pts.length - 1 ? pts[pts.length - 1]
-        : [pts[i0][0] + (pts[i0 + 1][0] - pts[i0][0]) * frac, pts[i0][1] + (pts[i0 + 1][1] - pts[i0][1]) * frac];
-      line.setLatLngs(pts.slice(0, i0 + 1).concat([head]));    // 线条逐点生长
-      runner.setLatLng(head);                                   // 光点沿路径前进
-      if (t < 1) requestAnimationFrame(tick);
-      else {
-        const el = runner.getElement();                         // 到达终点：光点淡出
-        if (el) { const d = el.querySelector('.play-runner'); if (d) d.classList.add('play-fade'); }
-        setTimeout(() => { if (_playGroup) _playGroup.removeLayer(runner); }, 700);
-        resolve();
+// 播放主循环：全局时间戳驱动，暂停冻结时间累积，退出后 rAF 不再续订
+function playLoop(now) {
+  const st = _play;
+  if (!st || !st.running) return;                       // 退出后不留后台空转
+  const dt = Math.min(100, now - st.last); st.last = now;
+  if (!st.paused) st.t += dt * st.speed;                // 倍率作用于全局时长，暂停冻结
+  const n = st.seq.length;
+  const phase = st.phases.find(p => st.t < p.end) || st.phases[st.phases.length - 1];
+  const key = phase.type + ':' + phase.i;
+  if (st.phaseKey !== key) {                            // 进入新相位：一次性触发
+    st.phaseKey = key;
+    if (phase.type === 'city') {
+      showPlayMarker(st.seq[phase.i]);                  // 城市弹性淡入（已到城市永久保留）
+      updatePlayProgress(phase.i + 1, n);
+    } else if (phase.type === 'seg') {
+      st.zoomStart = st.zoom;
+      st.seg = st.segs[phase.i - 1];
+      st.segLine = st.seg.hasLeg
+        ? L.polyline([st.seg.pts[0]], { color: st.seg.color, weight: 2, opacity: 0.9, interactive: false }).addTo(_playGroup)
+        : null;                                         // 无 Leg 的跳跃段：光点移动但不画线
+      st.runner = L.marker(st.seg.pts[0], {
+        icon: L.divIcon({
+          className: 'play-runner-icon', iconSize: [16, 16], iconAnchor: [8, 8],
+          html: `<div class="play-runner" style="background:${st.seg.color}"></div>`,
+        }),
+        interactive: false,
+      }).addTo(_playGroup);
+      st.arrowShown = false;
+    } else if (phase.type === 'intro') {
+      st.zoomStart = st.zoom;
+      st.zoomStartCam = map.getCenter();
+    } else if (phase.type === 'end') {
+      if (st.runner) {                                  // 光点到达终点淡出
+        const el = st.runner.getElement();
+        const d = el && el.querySelector('.play-runner');
+        if (d) d.classList.add('play-fade');
       }
+      st.endTarget = map.getBoundsZoom(L.latLngBounds(st.seq.map(c => [c.lat, c.lng])), false, L.point(50, 50));
+      st.endCenter = L.latLngBounds(st.seq.map(c => [c.lat, c.lng])).getCenter();
+      st.zoomStart = st.zoom;
+      st.zoomStartCam = map.getCenter();
     }
-    requestAnimationFrame(tick);
-  });
+  }
+  const span = phase.end - phase.start;
+  const tp = Math.min(1, Math.max(0, (st.t - phase.start) / span));
+  const te = easeInOutCubic(tp);
+  if (phase.type === 'seg' && !st.paused) {             // 路径生长 + 光点 + 相机跟随
+    const seg = st.seg, pts = seg.pts;
+    const head = pathPoint(pts, te);
+    if (st.segLine) {
+      const fi = te * (pts.length - 1), i0 = Math.floor(fi);
+      st.segLine.setLatLngs(pts.slice(0, i0 + 1).concat([head]));   // 线条像画出来一样连续生长
+    }
+    if (st.runner) st.runner.setLatLng(head);                       // 光点连续移动不瞬移
+    const z1 = playZoomFor(st.seq[phase.i - 1], st.seq[phase.i]);
+    playCamera(head, st.zoomStart + (z1 - st.zoomStart) * te);      // 中心=光点，缩放平滑过渡
+    if (te >= 1 && !st.arrowShown) { st.arrowShown = true; addPlayArrow(seg); }   // 生长完成后箭头淡入
+  } else if (phase.type === 'intro' && !st.paused) {    // 开场：缓动飞向首城
+    const c = st.seq[0];
+    playCamera(
+      [lerp(st.zoomStartCam.lat, c.lat, te), lerp(st.zoomStartCam.lng, c.lng, te)],
+      st.zoomStart + (playZoomFor(null, c) - st.zoomStart) * te
+    );
+  } else if (phase.type === 'end' && !st.paused) {      // 收尾：缓动拉回全国视图
+    playCamera(
+      [lerp(st.zoomStartCam.lat, st.endCenter.lat, te), lerp(st.zoomStartCam.lng, st.endCenter.lng, te)],
+      st.zoomStart + (st.endTarget - st.zoomStart) * te
+    );
+  }
+  if (st.t >= st.total) { finishPlay(); return; }
+  st.raf = requestAnimationFrame(playLoop);
+}
+// 段生长完成：中点方向箭头淡入（颜色随交通方式）
+function addPlayArrow(seg) {
+  if (!seg.hasLeg || !_playGroup) return;
+  const pts = seg.pts, m = Math.floor(pts.length / 2);
+  const a = pts[Math.max(0, m - 1)], b = pts[Math.min(pts.length - 1, m + 1)];
+  const ang = Math.atan2((b[1] - a[1]) * Math.cos(a[0] * Math.PI / 180), b[0] - a[0]) * 180 / Math.PI;
+  L.marker(pts[m], {
+    interactive: false,
+    icon: L.divIcon({
+      className: 'fp-arrow-icon', iconSize: [6, 10], iconAnchor: [3, 5],
+      html: `<div class="fp-arrow play-arrow-in" style="transform:rotate(${ang.toFixed(1)}deg);border-bottom-color:${seg.color}"></div>`,
+    }),
+  }).addTo(_playGroup);
 }
 // 城市到达标记：0.3s 缩放淡入 + 名称/到达日期标签；已播放城市保留不清除
 function showPlayMarker(city) {
@@ -1358,7 +1420,8 @@ function updatePlayStats() {
   const m = LEGS.filter(l => l.tripId === tripId).length;
   document.getElementById('play-stats').textContent = `该行程：${n} 个城市 · ${m} 段交通`;
 }
-async function startPlay(tripId) {
+// 启动播放：一次性预读全部数据进内存，播放期间零查询、零图层重建
+function startPlay(tripId) {
   if (_play && _play.running) exitPlay();
   const seq = playSequence(tripId);
   if (!seq.length) { toast('该行程暂无城市，无法播放'); return; }
@@ -1369,44 +1432,30 @@ async function startPlay(tripId) {
   if (_wishGroup) map.removeLayer(_wishGroup); // 播放视图专注轨迹
   _playGroup = L.layerGroup().addTo(map);
   const speed = parseFloat(document.getElementById('play-speed').value) || 1;
-  _play = { running: true, paused: false, speed, abort: false, tripId };
+  const segs = buildSegments(seq);                       // 预读：城市坐标/路径点/颜色全部进内存
+  const { phases, total } = buildTimeline(seq.length);
+  map.options.zoomSnap = 0;                              // 播放期支持连续缩放，收尾恢复
+  _play = {
+    running: true, paused: false, speed, tripId, seq, segs, phases, total,
+    t: 0, zoom: map.getZoom(), zoomStart: map.getZoom(), zoomStartCam: map.getCenter(),
+    phaseKey: '', last: performance.now(), raf: 0,
+  };
   document.getElementById('play-pause').textContent = '⏸ 暂停';
   setPlayBar(true);
-  // 一次性预读全部数据（城市/路径点/颜色），播放循环内零查询
-  const segs = buildSegments(seq);
-  const n = seq.length;
-  for (let i = 0; i < n; i++) {
-    if (!_play.running) return;
-    const city = seq[i];
-    updatePlayProgress(i + 1, n);
-    showPlayMarker(city);                                      // 城市淡入（已到城市保留）
-    map.flyTo([city.lat, city.lng], playZoomFor(i ? seq[i - 1] : null, city),
-      { duration: 1.2, easeLinearity: 0.25 });                 // 平滑飞行
-    await playWait(1300);
-    if (!_play.running) return;
-    if (i > 0 && segs[i - 1].hasLeg) {
-      await animateSegment(segs[i - 1]);                       // 路线生长 + 光点前进
-      if (!_play.running) return;
-    }
-    await playWait(800);                                       // 到城停留 0.8s
-    if (!_play.running) return;
-  }
-  await playWait(2000);                                        // 最后停留 2 秒
-  if (!_play.running) return;
-  map.flyToBounds(L.latLngBounds(seq.map(c => [c.lat, c.lng])), { duration: 1.2, padding: [40, 40] });
-  await playWait(1400);                                        // 拉回全国视图，显示完整轨迹
-  finishPlay();
+  _play.raf = requestAnimationFrame(playLoop);
 }
+// 收尾：清除播放图层组与光点，恢复地图交互与业务图层；rAF 全部取消
 function finishPlay() {
+  if (_play && _play.raf) { cancelAnimationFrame(_play.raf); _play.raf = 0; }
+  if (_play) _play.running = false;
   if (_playGroup) { map.removeLayer(_playGroup); _playGroup = null; }
   if (_legGroup && !map.hasLayer(_legGroup)) map.addLayer(_legGroup);   // 恢复业务连线 = 完整轨迹
   if (_wishGroup && !map.hasLayer(_wishGroup)) map.addLayer(_wishGroup);
+  map.options.zoomSnap = 1;
   setMapLock(false);
   setPlayBar(false);
-  if (_play) _play.running = false;
 }
 function exitPlay() {
-  if (_play) { _play.abort = true; _play.running = false; }
   finishPlay();
 }
 function bindPlay() {
@@ -1416,6 +1465,13 @@ function bindPlay() {
     if (!_play || !_play.running) return;
     _play.paused = !_play.paused;
     document.getElementById('play-pause').textContent = _play.paused ? '▶ 继续' : '⏸ 暂停';
+    if (_play.paused) {                                     // 暂停：取消 rAF，镜头/光点/线条全部冻结
+      if (_play.raf) cancelAnimationFrame(_play.raf);
+      _play.raf = 0;
+    } else {                                                // 继续：基于时间差恢复，不堆叠定时器
+      _play.last = performance.now();
+      _play.raf = requestAnimationFrame(playLoop);
+    }
   });
   document.getElementById('play-replay').addEventListener('click', () => {
     const tripId = document.getElementById('play-trip').value || (_play && _play.tripId);
