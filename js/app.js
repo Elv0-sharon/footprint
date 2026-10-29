@@ -2555,7 +2555,11 @@ function bindSettings() {
 
   const btnSyncUp = document.getElementById('btn-sync-up');
   if (btnSyncUp) btnSyncUp.addEventListener('click', async () => {
-    if (!window._sbUser) { toast('请先登录（右上角头像），登录后才能上传到云端'); return; }
+    if (!window._sbUser) {
+      const av = document.getElementById('btn-avatar');
+      toast('当前页面未检测到登录（头像显示：' + (av ? av.textContent.trim() : '游客') + '）。请在当前页面点头像重新登录；注意 github.io 与 deno.net 是两个独立站点，登录状态不互通');
+      return;
+    }
     btnSyncUp.disabled = true;
     const old = btnSyncUp.textContent; btnSyncUp.textContent = '上传中…';
     try {
