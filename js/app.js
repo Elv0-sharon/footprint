@@ -49,7 +49,7 @@ function initTheme() {
 /* 瓦片层：初始化时浅/深两层一次性创建，切换主题只切可见性，绝不 new / 移除重建 */
 function createTileLayers() {
   if (_tilesReady) return;
-  const opts = { subdomains: '1234', maxZoom: 18, noWrap: true, attribution: '© 高德地图 GS(2023)4197号' };
+  const opts = { subdomains: '1234', maxZoom: 18, attribution: '© 高德地图 GS(2023)4197号' };   // 允许东西向环绕（像高德/百度一样左右滑到太平洋→美洲）
   _tileLight = L.tileLayer(TILE_URLS.light, opts);
   _tileDark = L.tileLayer(TILE_URLS.dark, opts);
   [_tileLight, _tileDark].forEach(layer => {
@@ -110,6 +110,8 @@ const MODE_STYLE = {
   boat:      { color: '#4a90a4', dash: null, icon: '⛵', label: '轮船' },
   car:       { color: '#B34532', dash: null, icon: '🚗', label: '自驾' },
 };
+// 图例点击隐藏/显示对应交通方式的连线（会话内有效，不落库）
+const _hiddenModes = new Set();
 const LEG_FALLBACK = {
   walk: { color: '#6b7280', dash: '1,6', icon: '🚶', label: '步行' },
 };
@@ -224,8 +226,7 @@ function initMap() {
   if (_mapReady) return;
   map = L.map('map', {
     zoomControl: true, doubleClickZoom: false,
-    maxBounds: [[-85, -180], [85, 180]],   // 锁定在世界地图范围内，不出灰底
-    maxBoundsViscosity: 1.0,
+    maxBounds: [[-85, -540], [85, 540]],   // 只锁南北纬 ±85（防灰底）；东西向放开 3 个世界宽度，配合瓦片环绕实现左右无限滑
   }).setView([35, 105], 4);
   // 动态最小缩放：保证视野恰好装下一张完整世界地图（屏越大允许的 minZoom 越大）
   setTimeout(() => {
@@ -260,6 +261,15 @@ function initMap() {
   _mapReady = true;
   setTiles(_theme);   // 就绪后立即显示当前主题瓦片层（此前这里缺失，首次打开瓦片不加载的根因）
   renderLegend();
+  // 图例点击：隐藏/显示对应交通方式的连线
+  document.getElementById('map-legend').addEventListener('click', (e) => {
+    const item = e.target.closest('[data-mode]');
+    if (!item) return;
+    const mode = item.dataset.mode;
+    if (_hiddenModes.has(mode)) _hiddenModes.delete(mode); else _hiddenModes.add(mode);
+    renderLegend();
+    renderMap();
+  });
   renderMap();
   ensureProvinceData().then(() => renderProvinces());
 }
@@ -332,7 +342,7 @@ function renderMap() {
       // 往返/重叠错开：相同城市对的直线连线分组，按序平行偏移（去程左偏、回程右偏、同向依次错开）
       const groups = new Map();
       LEGS.forEach(leg => {
-        if (leg.mode === 'plane') return;   // 飞机弧线保持原有左右弯曲规则，不参与偏移
+        if (leg.mode === 'plane' || _hiddenModes.has(leg.mode)) return;   // 飞机弧线保持原有左右弯曲规则，不参与偏移；被隐藏的交通方式不画
         const pa = legEndpoint(leg, 'from'), pb = legEndpoint(leg, 'to');
         const A = legCoords(pa), B = legCoords(pb);
         if (!A || !B) return;
@@ -359,6 +369,7 @@ function renderMap() {
         });
       });
       LEGS.forEach(leg => {
+        if (_hiddenModes.has(leg.mode)) return;   // 图例点击隐藏的交通方式不画线
         const pa = legEndpoint(leg, 'from'), pb = legEndpoint(leg, 'to');
         let A = legCoords(pa), B = legCoords(pb);
         if (!A || !B) return;   // 任一端缺坐标/无记录则不画该段，另一端不报错
@@ -467,7 +478,8 @@ function renderLegend() {
   el.innerHTML = Object.keys(MODE_STYLE).map(k => {
     const s = MODE_STYLE[k];
     const d = s.dash ? `border-top-style:dashed;border-top-color:${s.color};` : `border-top-color:${s.color};`;
-    return `<span class="item"><span class="line" style="${d}"></span>${s.icon} ${s.label}</span>`;
+    return `<span class="item${_hiddenModes.has(k) ? ' off' : ''}" data-mode="${k}" title="点击隐藏/显示该交通方式的连线">`
+      + `<span class="line" style="${d}"></span>${s.icon} ${s.label}</span>`;
   }).join('');
 }
 
