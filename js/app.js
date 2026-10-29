@@ -1323,6 +1323,14 @@ function playSequence(tripId) {
     .sort((a, b) => a.ord.localeCompare(b.ord))
     .map(x => x.s);
 }
+function isHomeCoord(p) {
+  return !!p && Math.abs(Number(p[0]) - HOME_CITY.lat) < 0.05 && Math.abs(Number(p[1]) - HOME_CITY.lng) < 0.05;
+}
+function isHomeCity(city) {
+  if (!city) return false;
+  if ((city.nameZh || '').trim() === (HOME_CITY.name || '').trim()) return true;
+  return isHomeCoord([city.lat, city.lng]);
+}
 // 解析 Leg 端点为可匹配对象（stop→stopId；home→常驻城名称/坐标；custom→名称/坐标）
 function legEndpointRaw(l, end) {
   const e = l[end];
@@ -1439,6 +1447,18 @@ function buildSegments(seq) {
       zoom: playZoomFor(i ? seq[i - 1] : null, seq[i]),
     };
   }
+  // 没有登记「常驻地 → 首城」交通段时，补一段从常驻地出发的动画
+  if (!segs[0] && seq.length && !isHomeCity(seq[0])) {
+    const A = [HOME_CITY.lat, HOME_CITY.lng], B = [seq[0].lat, seq[0].lng];
+    const { pts, ctrl } = buildPath(A, B, 'car');
+    segs[0] = {
+      hasLeg: true, synthetic: true, pts, ctrl, mode: 'home',
+      color: '#6b7280', icon: '🏠', label: '常驻地',
+      from: A, to: B, fromName: HOME_CITY.name, toName: seq[0].nameZh,
+      ms: segDuration(A, B, 'car'),
+      zoom: playZoomFor(null, seq[0]),
+    };
+  }
   // 尾段（离场）：最后一段旅程结束后，若存在「离开末城返回常驻地/其他城市」的交通段，也纳入播放
   if (seq.length) {
     const last = seq[seq.length - 1];
@@ -1464,6 +1484,19 @@ function buildSegments(seq) {
         };
       }
     }
+  }
+  // 没有登记「末城 → 常驻地」返程段时，补一段回常驻地的动画
+  if (seq.length && !segs[seq.length] && !isHomeCity(seq[seq.length - 1])) {
+    const last = seq[seq.length - 1];
+    const A = [last.lat, last.lng], B = [HOME_CITY.lat, HOME_CITY.lng];
+    const { pts, ctrl } = buildPath(A, B, 'car');
+    segs[seq.length] = {
+      hasLeg: true, synthetic: true, outbound: true, pts, ctrl, mode: 'home',
+      color: '#6b7280', icon: '🏠', label: '常驻地',
+      from: A, to: B, fromName: last.nameZh || '', toName: HOME_CITY.name,
+      ms: segDuration(A, B, 'car'),
+      zoom: playZoomFor(last, { lat: B[0], lng: B[1] }),
+    };
   }
   return segs;
 }
@@ -1651,7 +1684,12 @@ function enterPlayPhase(phase) {
     prefetchTilesAlong(seg.pts, st.zoom, 12);
     prefetchArea(seg.to[0], seg.to[1], st.zoom, 1);
     st.segLine = seg.hasLeg
-      ? L.polyline([seg.pts[0]], { color: seg.color, weight: 2, opacity: 0.9, interactive: false }).addTo(_playGroup)
+      ? L.polyline([seg.pts[0]], {
+          color: seg.color, weight: 3, opacity: 0.95,
+          dashArray: seg.synthetic ? '6 6' : null,   // 常驻地往返的补段用虚线区分
+          lineCap: 'round', lineJoin: 'round',
+          interactive: false,
+        }).addTo(_playGroup)
       : null;                                       // 无 Leg 的跳跃段：光点移动但不画线
     st.runner = L.marker(seg.pts[0], {
       icon: L.divIcon({
@@ -1674,6 +1712,7 @@ function enterPlayPhase(phase) {
     if (st.segs[0]) {
       prefetchTilesAlong(st.segs[0].pts, st.segs[0].zoom, 10);
       prefetchArea(st.segs[0].to[0], st.segs[0].to[1], st.segs[0].zoom, 1);
+      if (isHomeCoord(st.segs[0].from) && !isHomeCity(st.seq[0])) showHomeMarker();   // 常驻地出发标记
     }
     setPlayStatus('准备出发…');
   } else if (phase.type === 'end') {
@@ -1725,7 +1764,10 @@ function playLoop(now) {
       st.segLine.setLatLngs(pts.slice(0, i0 + 1).concat([head]));   // 线条像画出来一样连续生长
     }
     if (st.runner) st.runner.setLatLng(head);                       // 光点连续移动不瞬移
-    playCamera(head, st.zoom);                                      // 中心=光点
+    // 镜头略微前瞻，让行进方向上的线更早进入视野，而不是死钉在光点上
+    // 3% 足够看出线条走向，又不会把刚出发的常驻地/起点挤出屏幕
+    const lookT = te + 0.03 * (1 - te);
+    playCamera(pathPoint(pts, lookT), st.zoom);
     if (te >= 1 && !st.arrowShown) { st.arrowShown = true; addPlayArrow(seg); }   // 生长完成后箭头淡入
   }
   updatePlayFill();
@@ -1756,6 +1798,12 @@ function showPlayMarker(city) {
     }),
     interactive: false,
   }).addTo(_playGroup);
+}
+function showHomeMarker() {
+  const st = _play;
+  if (!st || st.homeMarked || !isFinite(HOME_CITY.lat) || !isFinite(HOME_CITY.lng)) return;
+  st.homeMarked = true;
+  showPlayMarker({ nameZh: (HOME_CITY.name || '常驻地') + '（常驻地）', lat: HOME_CITY.lat, lng: HOME_CITY.lng, arriveDate: '' });
 }
 // 播放期锁地图交互；退出时按进入前状态精确恢复（doubleClickZoom 初始是关闭的）
 let _mapLockSaved = null;
@@ -2845,9 +2893,13 @@ function bindSettings() {
       await loadPhotoIndex();
       await refreshCoverUrls();
       refreshSelects(); renderLegend(); initMap(); renderTimeline(); renderLists(); renderDiaries(); renderWishes(); renderStats();
+      const boot = document.getElementById('boot');
+      if (boot) boot.hidden = true;   // 首屏已就绪，撤掉加载提示
       return counts;
     } catch (err) {
       console.error(err);
+      const bootMsg = document.getElementById('boot-msg');
+      if (bootMsg) bootMsg.textContent = '初始化失败：' + err.message;
       toast('初始化出错：' + err.message);
     }
   };

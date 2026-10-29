@@ -378,9 +378,26 @@ async function sbInit() {
     return;
   }
   try {
-    const { data, error } = await sb.auth.getSession();
-    if (error) throw error;
-    setSbUser(data.session ? data.session.user : null);
+    const sessionPromise = sb.auth.getSession();
+    // 鉴权服务偶发挂起时不能让首屏一直等：2.5 秒后先按游客启动，
+    // 会话迟到再自动切云端（onSignedIn 会重新合并/加载）。
+    const timeout = new Promise(resolve => setTimeout(() => resolve({ __timeout: true }), 2500));
+    const res = await Promise.race([sessionPromise, timeout]);
+    if (res && res.__timeout) {
+      console.warn('[footprint] 会话恢复超时，先以游客模式启动');
+      setSbUser(null);
+      sessionPromise.then(({ data }) => {
+        if (data && data.session && !(_sbUser)) {
+          setSbUser(data.session.user);
+          updateAuthUI();
+          if (window.onSignedIn) window.onSignedIn();
+        }
+      }).catch(() => {});
+    } else {
+      const { data, error } = res;
+      if (error) throw error;
+      setSbUser(data.session ? data.session.user : null);
+    }
   } catch (e) {
     console.warn('[footprint] Supabase 会话恢复失败：', e.message);
     setSbUser(null);
