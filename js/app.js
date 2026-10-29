@@ -351,9 +351,10 @@ function renderMap() {
         const gap = Math.max(0.03, Math.min(0.6, dist * 0.03));   // 偏移随间距自适应：远微偏、近显偏
         list.forEach((item, i) => {
           const k = i - (n - 1) / 2;   // 相邻两条相距一个 gap
+          // 端点钉在城市上，用中段弓出的弧线错开（二次贝塞尔中点达控制偏移的一半，故 ×2）
+          const mx = (item.A[0] + item.B[0]) / 2, my = (item.A[1] + item.B[1]) / 2;
           offsets.set(item.leg.id, {
-            A: [item.A[0] + nx * gap * k, item.A[1] + ny * gap * k],
-            B: [item.B[0] + nx * gap * k, item.B[1] + ny * gap * k],
+            ctrl: [mx + nx * gap * k * 2, my + ny * gap * k * 2],
           });
         });
       });
@@ -366,8 +367,12 @@ function renderMap() {
         if (leg.mode === 'plane') { ctrl = curveCtrl(A, B); pts = planeCurve(A, B, ctrl); }
         else {
           const off = offsets.get(leg.id);
-          if (off) { A = off.A; B = off.B; }   // 偏移后的起止点，箭头随之中点偏移
-          pts = [A, B];
+          if (off && (Math.abs(off.ctrl[0] - (A[0] + B[0]) / 2) > 1e-9 || Math.abs(off.ctrl[1] - (A[1] + B[1]) / 2) > 1e-9)) {
+            ctrl = off.ctrl;                  // 同址多条：端点不动、中段弓弧错开
+            pts = planeCurve(A, B, ctrl);
+          } else {
+            pts = [A, B];
+          }
         }
         const tp = legTimePopup(leg);   // 时间为空的侧不显示
         // 全部实线，线宽 2
