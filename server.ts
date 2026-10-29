@@ -9,14 +9,34 @@ const CORS = {
   'Access-Control-Max-Age': '86400',
 };
 
+const SITE = 'https://elv0-sharon.github.io/footprint';   // 静态资源回源（同源方案：页面与 API 同在 deno.net 域名下）
+
 Deno.serve(async (req) => {
   const url = new URL(req.url);
 
+  // 非 /sb 路径：回源 GitHub Pages 静态资源，让应用可直接跑在 deno.net 域名下
+  // （页面与 API 同源，浏览器拦截扩展/安全 DNS 不会把 API 当第三方请求拦掉）
   if (!url.pathname.startsWith('/sb/')) {
-    return new Response('footprint proxy OK. Use /sb/*', {
-      status: 200,
-      headers: { 'Content-Type': 'text/plain; charset=utf-8', ...CORS },
-    });
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      return new Response('Not Found', { status: 404, headers: { ...CORS } });
+    }
+    const upUrl = SITE + (url.pathname === '/' ? '/' : url.pathname) + url.search;
+    try {
+      const rh = new Headers();
+      rh.set('accept-encoding', 'identity');
+      const resp = await fetch(upUrl, { headers: rh, redirect: 'follow' });
+      const out = new Response(resp.body, resp);
+      out.headers.set('Access-Control-Allow-Origin', '*');
+      out.headers.delete('content-encoding');   // 运行时可能已解压：删编码头防 ERR_CONTENT_DECODING_FAILED
+      out.headers.delete('content-length');
+      out.headers.delete('transfer-encoding');
+      return out;
+    } catch (e) {
+      return new Response('static upstream failed: ' + String(e), {
+        status: 502,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8', ...CORS },
+      });
+    }
   }
 
   if (req.method === 'OPTIONS') {
