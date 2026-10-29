@@ -60,7 +60,7 @@ function _clear(store) {
   }));
 }
 
-/* ---- 登录态路由：云端优先；云端失败时回退/保留本机副本，避免“登录后反而丢数据” ---- */
+/* ---- 登录态路由：读取优先云端（失败回退本机缓存）；写入/删除先云端，成功后同步本机缓存 ---- */
 const _cloudOn = () => !!(window._sbUser && window.SBCloud);
 let _lastCloudToast = 0;
 function warnCloud(msg, e) {
@@ -79,23 +79,28 @@ async function readCloudOrLocal(store, cloudFn) {
     return _getAll(store);
   }
 }
+// 登录态：先写/删云端，成功后再同步本机 IndexedDB 作为缓存；游客态只操作本机
 async function putCloudAndLocal(store, cloudFn, item) {
   if (!_cloudOn()) return _put(store, item);
-  await _put(store, item);          // 先落本机，云端失败也不丢数据
-  try { await cloudFn(item); }
+  let result;
+  try { result = await cloudFn(item); }
   catch (e) {
-    warnCloud('已保存到本机，云端同步失败（可在设置里重试）', e);
-    throw e;                        // 让调用方知道云端没成功（本机副本已保留）
+    console.warn('[footprint] 云端写入失败，未更新本机缓存：', store, item && item.id, e);
+    throw e;
   }
+  await _put(store, item);
+  return result;
 }
 async function delCloudAndLocal(store, key, cloudFn) {
   if (!_cloudOn()) return _del(store, key);
-  try { await cloudFn(key); }
+  let result;
+  try { result = await cloudFn(key); }
   catch (e) {
-    warnCloud('云端删除失败，本机数据已保留', e);
+    console.warn('[footprint] 云端删除失败，未更新本机缓存：', store, key, e);
     throw e;
   }
   await _del(store, key);
+  return result;
 }
 
 const DB = {

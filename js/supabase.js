@@ -200,10 +200,9 @@ window.unmirrorPhoto = async function (id) {
   catch (e) { console.warn('[footprint] 云端照片删除失败：', e); }
 };
 
-// 登录合并：把游客期间录入的本机数据（按 id 去重）并入云端，手机等其它设备登录同一账号即可看到
+// 登录合并：把本机数据整体回写云端（同 id upsert 覆盖），本机后来的修改也能同步出去
 window.mergeLocalToCloud = async function () {
   if (!sb || !_sbUser || !DB.getLocalAll) return { up: 0, fail: 0, errors: [] };
-  const uid = _sbUser.id;
   const local = await DB.getLocalAll();
   const plan = [
     ['trips', t => SBCloud.putTrip(t)], ['stops', s => SBCloud.putStop(s)], ['legs', l => SBCloud.putLeg(l)],
@@ -212,20 +211,8 @@ window.mergeLocalToCloud = async function () {
   let up = 0, fail = 0;
   const errors = [];
   for (const [table, put] of plan) {          // 顺序 trips→stops→legs 满足外键依赖
-    let cloudIds = new Set();
-    try {
-      const { data, error } = await authRetry(() => sb.from(table).select('id').eq('user_id', uid));
-      if (error) throw error;
-      cloudIds = new Set((data || []).map(r => r.id));
-    } catch (e) {
-      // 读不到云端已有 id 时不能再静默跳过：如实上报，避免“看起来成功但一条没传”
-      console.warn('[footprint] 合并读取云端失败：', table, e);
-      errors.push(`${table} 读取云端失败：${(e && (e.message || e.code)) || e}`);
-      fail++;
-      continue;
-    }
     for (const item of (local[table] || [])) {
-      if (!item || !item.id || cloudIds.has(item.id)) continue;   // 云端已有同 id：不动
+      if (!item || !item.id) continue;        // 本机每条都 upsert，云端同 id 的旧内容会被覆盖
       try { await put(item); up++; }
       catch (e) {
         console.warn('[footprint] 合并上传失败：', table, item.id, e);

@@ -2306,6 +2306,29 @@ async function autoChainLeg(stop) {
     else if (kind === 'leg') startEditLeg(id);
   });
 
+  // 删除城市前先清理它的照片：本机照片 + 云端 photos 记录/Storage 文件
+  async function deleteStopPhotos(stopId) {
+    const photos = await DB.getPhotosByStop(stopId);
+    const ids = [];
+    for (const p of photos) {
+      await DB.delPhoto(p.id);
+      if (window.unmirrorPhoto) await window.unmirrorPhoto(p.id);
+      ids.push(p.id);
+    }
+    return ids;
+  }
+  // 清掉其它城市上指向已删照片的封面引用（被删城市本身不再处理）
+  async function clearDanglingCovers(photoIds, deletedStopIds) {
+    if (!photoIds.length) return;
+    const gone = new Set(photoIds);
+    const deleted = deletedStopIds || new Set();
+    const affected = STOPS.filter(s => !deleted.has(s.id) && s.coverPhotoId && gone.has(s.coverPhotoId));
+    for (const s of affected) {
+      s.coverPhotoId = '';
+      await DB.putStop(s);
+    }
+  }
+
   // 已有数据删除（事件委托）
   document.getElementById('data-lists').addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-del]');
@@ -2320,12 +2343,19 @@ async function autoChainLeg(stop) {
       await DB.delTrip(id);
       const sIds = STOPS.filter(s => s.tripId === id).map(s => s.id);
       const lIds = LEGS.filter(l => l.tripId === id).map(l => l.id);
-      for (const sid of sIds) await DB.delStop(sid);
+      const photoIds = [];
+      for (const sid of sIds) {
+        photoIds.push(...(await deleteStopPhotos(sid)));
+        await DB.delStop(sid);
+      }
       for (const lid of lIds) await DB.delLeg(lid);
+      await clearDanglingCovers(photoIds, new Set(sIds));
     } else if (kind === 'stop') {
+      const photoIds = await deleteStopPhotos(id);
       await DB.delStop(id);
       const lIds = LEGS.filter(l => l.fromStopId === id || l.toStopId === id).map(l => l.id);
       for (const lid of lIds) await DB.delLeg(lid);
+      await clearDanglingCovers(photoIds, new Set([id]));
     } else if (kind === 'leg') {
       await DB.delLeg(id);
     }
