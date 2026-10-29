@@ -258,7 +258,12 @@ function initMap() {
     if (el) bindPopupActions(el);
   });
   // 封面气泡随缩放级别显隐（zoom >= 9 显示）；地市标签重叠避让随缩放重算
-  map.on('zoomend', () => { updateBubbleVisibility(); resolveCityLabelOverlap(); });
+  // 播放期跳过：变焦动画期间这两个重算会每帧执行，是旧版卡顿的主要来源之一；收尾统一补算
+  map.on('zoomend', () => {
+    if (_play && _play.running) return;
+    updateBubbleVisibility();
+    resolveCityLabelOverlap();
+  });
   updateBubbleVisibility();
   _mapReady = true;
   setTiles(_theme);   // 就绪后立即显示当前主题瓦片层（此前这里缺失，首次打开瓦片不加载的根因）
@@ -1300,11 +1305,17 @@ function bindWish() {
   });
 }
 
-/* ===== 轨迹播放（mult.dev 手感：单一 rAF 主循环 + 全局时间轴 + 相机连续跟随） ===== */
+/* ===== 轨迹播放（参考 mult.dev：全局时间轴 + 段内固定缩放 + 停留期变焦 + 低开销瓦片预取） =====
+   性能要点：
+   1) 行进段只平移不缩放，变焦放在城市停留期用 Leaflet 自带动画完成 → 大幅减少 zoomend / 瓦片重载；
+   2) 播放中跳过标签避让与气泡显隐重算，收尾统一恢复；
+   3) 预取只取目标级别、低优先级、限量并发，避免和可视瓦片抢带宽；
+   4) 隐藏业务城市圆点/省界外轮廓，只保留播放图层。 */
 let _playGroup = null, _play = null;
-const SEG_MS = 2500, DWELL_MS = 1000, END_MS = 1800, INTRO_MS = 1200;   // 段生长/城市停留/收尾/开场
+const SEG_MS = 2500, DWELL_MS = 1000, END_MS = 1800, INTRO_MS = 1200;
+const MIN_SEG_MS = 1800, MAX_SEG_MS = 8000;
 const easeInOutCubic = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
-const lerp = (a, b, t) => a + (b - a) * t;
+
 // 播放顺序：行程内城市按到达日期升序，无日期按录入顺序排最后
 function playSequence(tripId) {
   return STOPS.filter(s => s.tripId === tripId)
@@ -1340,44 +1351,67 @@ function legBetween(prevId, curId) {
     return (endpointHitsStop(f, prev) && endpointHitsStop(t, cur)) || (endpointHitsStop(f, cur) && endpointHitsStop(t, prev));
   }) || null;
 }
+function endpointName(leg, end, fallback) {
+  const e = leg && leg[end];
+  if (e && e.kind === 'stop' && e.stopId) {
+    const s = stopById(e.stopId);
+    return s ? s.nameZh : (e.name || fallback || '');
+  }
+  return (e && e.name) || fallback || '';
+}
 // 路径参数取点：t∈[0,1] → 坐标（段内线性插值，t 本身经 easeInOutCubic 缓动）
 function pathPoint(pts, t) {
   const fi = t * (pts.length - 1), i0 = Math.floor(fi), frac = fi - i0;
   if (i0 >= pts.length - 1) return pts[pts.length - 1];
   return [pts[i0][0] + (pts[i0 + 1][0] - pts[i0][0]) * frac, pts[i0][1] + (pts[i0 + 1][1] - pts[i0][1]) * frac];
 }
-// 全局时间轴：开场 → [进出场段(可选)] → 每段「线生长+光点」→ 每城停留 → 收尾拉回全国
-function buildTimeline(seq, segs) {
-  const phases = []; let t = 0;
-  phases.push({ type: 'intro', i: 0, start: 0, end: t += INTRO_MS });
-  if (segs[0]) phases.push({ type: 'seg', i: 0, start: t, end: t += SEG_MS });
-  phases.push({ type: 'city', i: 0, start: t, end: t += DWELL_MS });
-  for (let i = 1; i < seq.length; i++) {
-    phases.push({ type: 'seg', i, start: t, end: t += SEG_MS });
-    phases.push({ type: 'city', i, start: t, end: t += DWELL_MS });
+function haversineKm(a, b) {
+  const R = 6371, rad = Math.PI / 180;
+  const dLat = (b[0] - a[0]) * rad, dLng = (b[1] - a[1]) * rad;
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * rad) * Math.cos(b[0] * rad) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+// 段时长随距离自适应：远距离给足时间，画面不会被瓦片加载甩开
+function segDuration(a, b, mode) {
+  const km = haversineKm(a, b);
+  const factor = mode === 'plane' ? 1.2 : 1.8;
+  return Math.round(Math.max(MIN_SEG_MS, Math.min(MAX_SEG_MS, 1500 + km * factor)));
+}
+// 缩放按城市间距自适应：区域视野（9 为主），瓦片量更低、更像 mult 的旅行路线视角
+function playZoomFor(prev, cur) {
+  if (!prev) return 9;
+  const d = Math.hypot(cur.lat - prev.lat, cur.lng - prev.lng);
+  if (d < 0.8) return 10;
+  if (d < 3) return 9;
+  if (d < 8) return 8;
+  return 7;
+}
+function buildPath(A, B, mode) {
+  if (mode === 'plane') {
+    const ctrl = curveCtrl(A, B);
+    return { pts: planeCurve(A, B, ctrl), ctrl };
   }
-  if (segs[seq.length]) phases.push({ type: 'seg', i: seq.length, start: t, end: t += SEG_MS });   // 离场段（返回常驻地）
-  phases.push({ type: 'end', start: t, end: t += END_MS });
-  return { phases, total: t };
+  if (isRailMode(mode)) {
+    const ctrl = trackCtrl(A, B, 1);   // 轨道式：与地图连线一致（行进方向左偏）
+    return { pts: planeCurve(A, B, ctrl), ctrl };
+  }
+  const pts = [], N = 24;               // 直线线性插值
+  for (let k = 0; k <= N; k++) pts.push([A[0] + (B[0] - A[0]) * k / N, A[1] + (B[1] - A[1]) * k / N]);
+  return { pts, ctrl: null };
 }
-// 相机帧驱动：中心/缩放一步到位（zoomSnap 已在播放期置 0，支持连续缩放）
-function playCamera(latlng, zoom) {
-  map.setView(latlng, zoom, { animate: false });
-  _play.zoom = zoom;
-}
-// 线段 0%→100% 逐段绘制动画
-// 播放前预读：把行程城市、每段 Leg 的完整路径点一次性构建进内存，播放中零数据查询
+// 播放前预读：把行程城市、每段 Leg 的完整路径点、时长、目标缩放一次性构建进内存，播放中零查询
 // segs[i] = 进入 seq[i] 的段（i>=1 为相邻城市间；i===0 为「从常驻地/外部进入首城」的进出场段，可能为 null）
 function buildSegments(seq) {
   const segs = [];
   const used = new Set();   // 一条 Leg 只分配给一个段，避免去/返共用时重复播放
   for (let i = 0; i < seq.length; i++) {
-    let leg = null, A;
+    let leg = null, A = null, fromName = '', toName = seq[i].nameZh || '';
     const B = [seq[i].lat, seq[i].lng];
     if (i > 0) {
       leg = legBetween(seq[i - 1].id, seq[i].id);
       if (leg && used.has(leg.id)) leg = null;
       A = [seq[i - 1].lat, seq[i - 1].lng];
+      fromName = seq[i - 1].nameZh || '';
     } else {
       // 首城：若存在「从常驻地/外部进入首城」的交通段，也纳入播放（起点不能就是首城自己）
       leg = LEGS.find(l => {
@@ -1389,24 +1423,21 @@ function buildSegments(seq) {
         const r = legEndpointRaw(leg, 'from');
         A = (r.lat != null && r.lat !== '' && r.lng != null && r.lng !== '') ? [Number(r.lat), Number(r.lng)] : null;
         if (!A) leg = null;   // 进场端缺坐标：跳过该段
+        else fromName = endpointName(leg, 'from', (HOME_CITY && HOME_CITY.name) || '出发地');
       }
     }
-    if (leg) used.add(leg.id);
+    if (leg) { used.add(leg.id); toName = seq[i].nameZh || endpointName(leg, 'to', ''); }
     if (!A) { segs[i] = null; continue; }
+    const mode = leg ? leg.mode : 'jump';
     const st = legStyle(leg ? leg.mode : 'train');
-    let pts, ctrl = null;
-    if (leg && leg.mode === 'plane') {
-      ctrl = curveCtrl(A, B);
-      pts = planeCurve(A, B, ctrl);                            // 弧线按贝塞尔参数取点
-    } else if (leg && isRailMode(leg.mode)) {
-      ctrl = trackCtrl(A, B, 1);                               // 轨道式：与地图连线一致（行进方向左偏）
-      pts = planeCurve(A, B, ctrl);
-    } else {
-      pts = [];
-      const N = 24;                                            // 直线线性插值
-      for (let k = 0; k <= N; k++) pts.push([A[0] + (B[0] - A[0]) * k / N, A[1] + (B[1] - A[1]) * k / N]);
-    }
-    segs[i] = { hasLeg: !!leg, pts, color: st.color, from: A, to: B, ctrl };
+    const { pts, ctrl } = buildPath(A, B, mode);
+    segs[i] = {
+      hasLeg: !!leg, pts, ctrl, mode,
+      color: st.color, icon: st.icon, label: st.label,
+      from: A, to: B, fromName, toName,
+      ms: segDuration(A, B, mode),
+      zoom: playZoomFor(i ? seq[i - 1] : null, seq[i]),
+    };
   }
   // 尾段（离场）：最后一段旅程结束后，若存在「离开末城返回常驻地/其他城市」的交通段，也纳入播放
   if (seq.length) {
@@ -1421,166 +1452,284 @@ function buildSegments(seq) {
       const B = (r.lat != null && r.lat !== '' && r.lng != null && r.lng !== '') ? [Number(r.lat), Number(r.lng)] : null;
       if (B) {
         used.add(leg.id);
-        const stl = legStyle(leg.mode);
         const A = [last.lat, last.lng];
-        let pts, ctrl = null;
-        if (leg.mode === 'plane') { ctrl = curveCtrl(A, B); pts = planeCurve(A, B, ctrl); }
-        else if (isRailMode(leg.mode)) { ctrl = trackCtrl(A, B, 1); pts = planeCurve(A, B, ctrl); }
-        else {
-          pts = [];
-          const N = 24;
-          for (let k = 0; k <= N; k++) pts.push([A[0] + (B[0] - A[0]) * k / N, A[1] + (B[1] - A[1]) * k / N]);
-        }
-        segs[seq.length] = { hasLeg: true, pts, color: stl.color, from: A, to: B, ctrl, outbound: true };
+        const stl = legStyle(leg.mode);
+        const { pts, ctrl } = buildPath(A, B, leg.mode);
+        segs[seq.length] = {
+          hasLeg: true, pts, ctrl, mode: leg.mode, outbound: true,
+          color: stl.color, icon: stl.icon, label: stl.label,
+          from: A, to: B, fromName: last.nameZh || '', toName: endpointName(leg, 'to', '目的地'),
+          ms: segDuration(A, B, leg.mode),
+          zoom: playZoomFor(last, { lat: B[0], lng: B[1] }),
+        };
       }
     }
   }
   return segs;
 }
-// 缩放按城市间距自适应：近距离 12，远距离 9
-function playZoomFor(prev, cur) {
-  if (!prev) return 11;
-  const d = Math.hypot(cur.lat - prev.lat, cur.lng - prev.lng);
-  if (d < 1) return 12;
-  if (d < 3) return 11;
-  if (d < 8) return 10;
-  return 9;
+// 全局时间轴：开场 → [进出场段(可选)] → 每段「线生长+光点」→ 每城停留 → 收尾拉回全国
+function buildTimeline(seq, segs) {
+  const phases = []; let t = 0;
+  phases.push({ type: 'intro', i: 0, start: 0, end: t += INTRO_MS });
+  if (segs[0]) phases.push({ type: 'seg', i: 0, start: t, end: t += segs[0].ms });
+  phases.push({ type: 'city', i: 0, start: t, end: t += DWELL_MS });
+  for (let i = 1; i < seq.length; i++) {
+    phases.push({ type: 'seg', i, start: t, end: t += (segs[i] ? segs[i].ms : SEG_MS) });
+    phases.push({ type: 'city', i, start: t, end: t += DWELL_MS });
+  }
+  if (segs[seq.length]) phases.push({ type: 'seg', i: seq.length, start: t, end: t += segs[seq.length].ms });   // 离场段
+  phases.push({ type: 'end', start: t, end: t += END_MS });
+  return { phases, total: t };
 }
-// 播放用瓦片预取：镜头到达前先把沿路瓦片拉进浏览器缓存，避免画面来不及加载
+
+/* ---- 瓦片预取：只补“镜头马上要到的地方”，低优先级 + 限量并发，避免抢可视瓦片带宽 ---- */
 const _prefetched = new Set();
+const _prefetchQueue = [];
+let _prefetchActive = 0;
+const PREFETCH_CONCURRENCY = 4;
+const PREFETCH_QUEUE_MAX = 80;
+function prefetchAllowed() {
+  const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  if (!c) return true;
+  if (c.saveData) return false;
+  return !/^(slow-2g|2g)$/.test(c.effectiveType || '');
+}
+function pumpPrefetch() {
+  while (_prefetchActive < PREFETCH_CONCURRENCY && _prefetchQueue.length) {
+    const [z, x, y] = _prefetchQueue.shift();
+    _prefetchActive++;
+    const img = new Image();
+    img.decoding = 'async';
+    try { img.fetchPriority = 'low'; } catch (e) {}
+    img.setAttribute('fetchpriority', 'low');
+    img.onload = img.onerror = () => { _prefetchActive--; pumpPrefetch(); };
+    const tpl = TILE_URLS[_theme] || TILE_URLS.light;
+    img.src = tpl.replace('{s}', String((Math.abs(x + y) % 4) + 1)).replace('{x}', x).replace('{y}', y).replace('{z}', z);
+  }
+}
 function prefetchTile(z, x, y) {
+  if (!prefetchAllowed()) return 0;
   const max = Math.pow(2, z);
   if (x < 0 || x >= max || y < 0 || y >= max) return 0;
   const key = z + '/' + x + '/' + y;
-  if (_prefetched.has(key)) return 0;
+  if (_prefetched.has(key) || _prefetchQueue.length >= PREFETCH_QUEUE_MAX) return 0;
   _prefetched.add(key);
-  const tpl = TILE_URLS[_theme] || TILE_URLS.light;
-  const img = new Image();
-  img.src = tpl.replace('{s}', String((Math.abs(x + y) % 4) + 1)).replace('{x}', x).replace('{y}', y).replace('{z}', z);
+  _prefetchQueue.push([z, x, y]);
+  pumpPrefetch();
   return 1;
 }
-function prefetchTilesAlong(pts, zoom) {
+function tileXY(lat, lng, zoom) {
+  const scale = Math.pow(2, zoom);
+  const latRad = Math.max(-85, Math.min(85, lat)) * Math.PI / 180;
+  const x = Math.floor((lng + 180) / 360 * scale);
+  const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * scale);
+  return [x, y];
+}
+function prefetchArea(lat, lng, zoom, radius = 1) {
+  const [x, y] = tileXY(lat, lng, zoom);
+  for (let dx = -radius; dx <= radius; dx++)
+    for (let dy = -radius; dy <= radius; dy++) prefetchTile(zoom, x + dx, y + dy);
+}
+function prefetchTilesAlong(pts, zoom, maxSamples = 10) {
   if (!pts || !pts.length || zoom == null) return;
-  const scale = Math.pow(2, zoom);   // 瓦片数（注意不是像素数 256×2^z）
-  let n = 0;
-  const step = Math.max(1, Math.floor(pts.length / 32));   // 沿路径最多采 32 个点
-  for (let i = 0; i < pts.length && n < 72; i += step) {
+  const step = Math.max(1, Math.floor(pts.length / maxSamples));
+  for (let i = 0; i < pts.length; i += step) {
     const p = pts[i];
-    const latRad = Math.max(-85, Math.min(85, p[0])) * Math.PI / 180;
-    const x = Math.floor((p[1] + 180) / 360 * scale);
-    const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * scale);
-    // 目标级别 + 低一级（过渡帧也能即时呈现）
-    n += prefetchTile(zoom, x, y) + prefetchTile(Math.max(2, zoom - 1), Math.floor(x / 2), Math.floor(y / 2));
+    const [x, y] = tileXY(p[0], p[1], zoom);
+    prefetchTile(zoom, x, y);
+  }
+  const last = pts[pts.length - 1];
+  prefetchArea(last[0], last[1], zoom, 1);   // 终点两侧补边角
+}
+function prefetchTilesBounds(bounds, zoom, maxTiles = 20) {
+  if (!bounds || zoom == null) return;
+  const nw = bounds.getNorthWest(), se = bounds.getSouthEast();
+  const [x0, y0] = tileXY(nw.lat, nw.lng, zoom);
+  const [x1, y1] = tileXY(se.lat, se.lng, zoom);
+  let n = 0;
+  for (let x = Math.min(x0, x1); x <= Math.max(x0, x1) && n < maxTiles; x++) {
+    for (let y = Math.min(y0, y1); y <= Math.max(y0, y1) && n < maxTiles; y++) {
+      n += prefetchTile(zoom, x, y);
+      if (n >= maxTiles) break;
+    }
   }
 }
-function prefetchTilesBounds(bounds, zoom) {
-  if (!bounds || zoom == null) return;
-  const scale = Math.pow(2, zoom);
-  const nw = bounds.getNorthWest(), se = bounds.getSouthEast();
-  const x0 = Math.floor((nw.lng + 180) / 360 * scale), x1 = Math.floor((se.lng + 180) / 360 * scale);
-  const y0 = Math.floor((1 - Math.log(Math.tan(nw.lat * Math.PI / 180) + 1 / Math.cos(nw.lat * Math.PI / 180)) / Math.PI) / 2 * scale);
-  const y1 = Math.floor((1 - Math.log(Math.tan(se.lat * Math.PI / 180) + 1 / Math.cos(se.lat * Math.PI / 180)) / Math.PI) / 2 * scale);
-  let n = 0;
-  for (let x = Math.min(x0, x1); x <= Math.max(x0, x1) && n < 64; x++)
-    for (let y = Math.min(y0, y1); y <= Math.max(y0, y1) && n < 64; y++)
-      n += prefetchTile(zoom, x, y);
+
+/* ---- 镜头 / 状态 ---- */
+// 行进段内固定缩放，只平移；setView 每帧一次，但不再改变缩放 → 瓦片不会反复重载
+function playCamera(latlng, zoom) {
+  map.setView(latlng, zoom == null ? _play.zoom : zoom, { animate: false });
+  if (zoom != null) _play.zoom = zoom;
+}
+function setPlayStatus(text) {
+  const el = document.getElementById('play-status');
+  if (el) el.textContent = text || '';
+}
+// Leaflet 的瓦片层默认在每次 moveend（setView 每帧都会触发）里 _update；播放期改为 5 次/秒，
+// 平移时地图像素位移很快，180ms 一次足够补上新进入视口的瓦片，但能把逐帧开销降一个数量级。
+function throttleTileUpdates() {
+  const st = _play;
+  st.tileLayers = [_tileLight, _tileDark].filter(Boolean).map(layer => {
+    const onMove = !!layer._onMove;
+    if (onMove) map.off('move', layer._onMove, layer);
+    map.off('moveend', layer._update, layer);
+    return { layer, onMove };
+  });
+  st.tileAt = 0;
+}
+function restoreTileUpdates() {
+  const st = _play;
+  if (!st || !st.tileLayers) return;
+  st.tileLayers.forEach(({ layer, onMove }) => {
+    if (onMove) map.on('move', layer._onMove, layer);
+    map.on('moveend', layer._update, layer);
+    try { layer._update(); } catch (e) { /* 忽略 */ }
+  });
+  st.tileLayers = null;
+}
+function tickTileUpdates(now) {
+  const st = _play;
+  if (!st || !st.tileLayers) return;
+  if (now - (st.tileAt || 0) < 180) return;
+  st.tileAt = now;
+  st.tileLayers.forEach(({ layer }) => {
+    if (map.hasLayer(layer)) {
+      try { layer._update(); } catch (e) { /* 忽略 */ }
+    }
+  });
+}
+function updatePlayFill() {
+  const st = _play;
+  const now = performance.now();
+  if (st.fillAt && now - st.fillAt < 120) return;
+  st.fillAt = now;
+  const el = document.getElementById('play-fill');
+  if (el) el.style.width = (st.total ? Math.min(100, st.t / st.total * 100) : 0).toFixed(2) + '%';
+}
+// 城市到达后旧光点淡出并移除，避免每段留下一个光点叠在城市圆点上
+function fadePlayRunner() {
+  const r = _play && _play.runner;
+  if (!r) return;
+  _play.runner = null;
+  const el = r.getElement();
+  const d = el && el.querySelector('.play-runner');
+  if (d) d.classList.add('play-fade');
+  setTimeout(() => { if (_playGroup && r) _playGroup.removeLayer(r); }, 650);
+}
+// 进入相位的一次性动作：建图层、切缩放、预取、状态文案
+function enterPlayPhase(phase) {
+  const st = _play;
+  if (phase.type === 'city') {
+    if (st.segLine && st.seg) {                       // 上一段收尾：线条补满 + 中点箭头淡入
+      st.segLine.setLatLngs(st.seg.pts);
+      if (st.seg.hasLeg) addPlayArrow(st.seg);
+    }
+    st.segLine = null; st.seg = null;
+    fadePlayRunner();
+    const city = st.seq[phase.i];
+    showPlayMarker(city);
+    updatePlayProgress(phase.i + 1, st.seq.length);
+    setPlayStatus(`📍 ${city.nameZh}${city.arriveDate ? ' · ' + city.arriveDate : ''}`);
+    const nx = st.segs[phase.i + 1];
+    if (nx) {
+      // 变焦放在停留期：镜头不动，只缩放，给下一段留出瓦片加载时间
+      if (Math.abs(nx.zoom - map.getZoom()) > 0.01) {
+        map.setView([city.lat, city.lng], nx.zoom, { animate: true });
+      }
+      st.zoom = nx.zoom;
+      prefetchTilesAlong(nx.pts, nx.zoom, 10);
+      prefetchArea(nx.to[0], nx.to[1], nx.zoom, 1);
+    } else {
+      st.zoom = map.getZoom();
+    }
+  } else if (phase.type === 'seg') {
+    const seg = st.segs[phase.i];
+    st.seg = seg;
+    st.zoom = seg.zoom;
+    if (map.stop) map.stop();
+    map.setView(seg.from, st.zoom, { animate: false });   // 段首对齐，段内不再改缩放
+    prefetchTilesAlong(seg.pts, st.zoom, 12);
+    prefetchArea(seg.to[0], seg.to[1], st.zoom, 1);
+    st.segLine = seg.hasLeg
+      ? L.polyline([seg.pts[0]], { color: seg.color, weight: 2, opacity: 0.9, interactive: false }).addTo(_playGroup)
+      : null;                                       // 无 Leg 的跳跃段：光点移动但不画线
+    st.runner = L.marker(seg.pts[0], {
+      icon: L.divIcon({
+        className: 'play-runner-icon', iconSize: [16, 16], iconAnchor: [8, 8],
+        html: `<div class="play-runner" style="background:${seg.color}"></div>`,
+      }),
+      interactive: false,
+    }).addTo(_playGroup);
+    st.arrowShown = false;
+    setPlayStatus(`${seg.icon} ${seg.fromName} → ${seg.toName}`);
+  } else if (phase.type === 'intro') {
+    st.zoom = st.introZoom;
+    if (map.stop) map.stop();
+    // 开场用 Leaflet flyTo：一次调用完成平滑的“拉远-飞行-拉近”，不再逐帧改缩放
+    map.flyTo([st.introTo.lat, st.introTo.lng], st.introZoom, {
+      duration: Math.max(0.35, (INTRO_MS - 120) / 1000 / st.speed),   // 留一点余量，避免被相位结束截断
+      easeLinearity: 0.25,
+    });
+    prefetchArea(st.introTo.lat, st.introTo.lng, st.introZoom, 1);
+    if (st.segs[0]) {
+      prefetchTilesAlong(st.segs[0].pts, st.segs[0].zoom, 10);
+      prefetchArea(st.segs[0].to[0], st.segs[0].to[1], st.segs[0].zoom, 1);
+    }
+    setPlayStatus('准备出发…');
+  } else if (phase.type === 'end') {
+    if (st.segLine && st.seg) {                       // 最后一段补满 + 箭头
+      st.segLine.setLatLngs(st.seg.pts);
+      if (st.seg.hasLeg) addPlayArrow(st.seg);
+      st.segLine = null; st.seg = null;
+    }
+    fadePlayRunner();
+    const endPts = st.seq.map(c => [c.lat, c.lng]);
+    if (st.segs[st.seq.length] && st.segs[st.seq.length].outbound) endPts.push(st.segs[st.seq.length].to);
+    const endBounds = L.latLngBounds(endPts);
+    const maxZ = st.seq.length > 1 ? 9 : 11;
+    const z = Math.min(maxZ, map.getBoundsZoom(endBounds, false, L.point(60, 60)));
+    st.zoom = z;
+    st.endCenter = endBounds.getCenter();
+    st.endTarget = z;
+    if (map.stop) map.stop();
+    map.flyTo(st.endCenter, z, {
+      duration: Math.max(0.5, (END_MS - 150) / 1000 / st.speed),   // 留余量，确保收尾视野完整
+      easeLinearity: 0.25,
+    });
+    prefetchTilesBounds(endBounds, z, 20);
+    setPlayStatus('行程回顾');
+  }
 }
 // 播放主循环：全局时间戳驱动，暂停冻结时间累积，退出后 rAF 不再续订
 function playLoop(now) {
   const st = _play;
   if (!st || !st.running) return;                       // 退出后不留后台空转
+  if (st.paused) { st.raf = 0; return; }                // 暂停后可能在途的一帧：不再续订
   const dt = Math.min(100, now - st.last); st.last = now;
-  if (!st.paused) st.t += dt * st.speed;                // 倍率作用于全局时长，暂停冻结
-  const n = st.seq.length;
+  st.t += dt * st.speed;                                // 倍率作用于全局时长
   const phase = st.phases.find(p => st.t < p.end) || st.phases[st.phases.length - 1];
   const key = phase.type + ':' + phase.i;
   if (st.phaseKey !== key) {                            // 进入新相位：一次性触发
     st.phaseKey = key;
-    if (phase.type === 'city') {
-      // 上一段收尾：线条补满全程 + 中点箭头淡入（帧间隙可能跳过 te>=1 的那一帧）
-      if (st.segLine && st.seg) {
-        st.segLine.setLatLngs(st.seg.pts);
-        if (st.seg.hasLeg) addPlayArrow(st.seg);
-      }
-      st.segLine = null; st.seg = null;
-      showPlayMarker(st.seq[phase.i]);                  // 城市弹性淡入（已到城市永久保留）
-      updatePlayProgress(phase.i + 1, n);
-      const nx = st.segs[phase.i + 1];                  // 停留期间预取下一段沿路瓦片（镜头到达前热缓存）
-      if (nx) prefetchTilesAlong(nx.pts, playZoomFor(st.seq[phase.i], st.seq[phase.i + 1] || { lat: nx.to[0], lng: nx.to[1] }));
-    } else if (phase.type === 'seg') {
-      st.zoomStart = st.zoom;
-      st.seg = st.segs[phase.i];
-      prefetchTilesAlong(st.seg.pts, playZoomFor(phase.i ? st.seq[phase.i - 1] : null, st.seq[phase.i] || { lat: st.seg.to[0], lng: st.seg.to[1] }));   // 提前加载本段沿路瓦片
-      st.segLine = st.seg.hasLeg
-        ? L.polyline([st.seg.pts[0]], { color: st.seg.color, weight: 2, opacity: 0.9, interactive: false }).addTo(_playGroup)
-        : null;                                         // 无 Leg 的跳跃段：光点移动但不画线
-      st.runner = L.marker(st.seg.pts[0], {
-        icon: L.divIcon({
-          className: 'play-runner-icon', iconSize: [16, 16], iconAnchor: [8, 8],
-          html: `<div class="play-runner" style="background:${st.seg.color}"></div>`,
-        }),
-        interactive: false,
-      }).addTo(_playGroup);
-      st.arrowShown = false;
-    } else if (phase.type === 'intro') {
-      st.zoomStart = st.zoom;
-      st.zoomStartCam = map.getCenter();
-      prefetchTilesAlong([[st.introTo.lat, st.introTo.lng]], playZoomFor(null, st.seq[0]));   // 预取首城周边瓦片
-    } else if (phase.type === 'end') {
-      if (st.segLine && st.seg) {                       // 最后一段同样补满 + 箭头
-        st.segLine.setLatLngs(st.seg.pts);
-        if (st.seg.hasLeg) addPlayArrow(st.seg);
-        st.segLine = null; st.seg = null;
-      }
-      if (st.runner) {                                  // 光点到达终点淡出
-        const el = st.runner.getElement();
-        const d = el && el.querySelector('.play-runner');
-        if (d) d.classList.add('play-fade');
-      }
-      // 收尾视野：覆盖全部城市 + 离场段终点（返回常驻地）
-      const endPts = st.seq.map(c => [c.lat, c.lng]);
-      if (st.segs[st.seq.length] && st.segs[st.seq.length].outbound) endPts.push(st.segs[st.seq.length].to);
-      const endBounds = L.latLngBounds(endPts);
-      st.endTarget = map.getBoundsZoom(endBounds, false, L.point(50, 50));
-      st.endCenter = endBounds.getCenter();
-      st.zoomStart = st.zoom;
-      st.zoomStartCam = map.getCenter();
-      prefetchTilesBounds(endBounds, st.endTarget);   // 预取全国视图瓦片
-    }
+    enterPlayPhase(phase);
   }
   const span = phase.end - phase.start;
   const tp = Math.min(1, Math.max(0, (st.t - phase.start) / span));
   const te = easeInOutCubic(tp);
-  if (phase.type === 'seg' && !st.paused) {             // 路径生长 + 光点 + 相机跟随
+  if (phase.type === 'seg') tickTileUpdates(now);       // 瓦片更新限流（5 次/秒）
+  if (phase.type === 'seg') {                           // 路径生长 + 光点 + 相机平移（缩放固定）
     const seg = st.seg, pts = seg.pts;
-    if (te > 0.6 && !st['_pf' + phase.i]) {             // 后半程前瞻预取下一段，镜头到达前热好缓存
-      st['_pf' + phase.i] = 1;
-      const nx = st.segs[phase.i + 1];
-      if (nx) prefetchTilesAlong(nx.pts, playZoomFor(st.seq[phase.i], st.seq[phase.i + 1] || { lat: nx.to[0], lng: nx.to[1] }));
-    }
     const head = pathPoint(pts, te);
     if (st.segLine) {
       const fi = te * (pts.length - 1), i0 = Math.floor(fi);
       st.segLine.setLatLngs(pts.slice(0, i0 + 1).concat([head]));   // 线条像画出来一样连续生长
     }
     if (st.runner) st.runner.setLatLng(head);                       // 光点连续移动不瞬移
-    const curCity = st.seq[phase.i] || { lat: st.seg.to[0], lng: st.seg.to[1] };   // 离场段：终点为常驻地等非城市坐标
-    const z1 = playZoomFor(phase.i ? st.seq[phase.i - 1] : null, curCity);
-    playCamera(head, st.zoomStart + (z1 - st.zoomStart) * te);      // 中心=光点，缩放平滑过渡
+    playCamera(head, st.zoom);                                      // 中心=光点
     if (te >= 1 && !st.arrowShown) { st.arrowShown = true; addPlayArrow(seg); }   // 生长完成后箭头淡入
-  } else if (phase.type === 'intro' && !st.paused) {    // 开场：缓动飞向进出场段起点（常驻地）或首城
-    const c = st.introTo;
-    playCamera(
-      [lerp(st.zoomStartCam.lat, c.lat, te), lerp(st.zoomStartCam.lng, c.lng, te)],
-      st.zoomStart + (playZoomFor(null, c) - st.zoomStart) * te
-    );
-  } else if (phase.type === 'end' && !st.paused) {      // 收尾：缓动拉回全国视图
-    playCamera(
-      [lerp(st.zoomStartCam.lat, st.endCenter.lat, te), lerp(st.zoomStartCam.lng, st.endCenter.lng, te)],
-      st.zoomStart + (st.endTarget - st.zoomStart) * te
-    );
   }
-  if (st.t >= st.total) { finishPlay(); return; }
+  updatePlayFill();
+  if (st.t >= st.total) { st.naturalEnd = true; finishPlay(); return; }
   st.raf = requestAnimationFrame(playLoop);
 }
 // 段生长完成：中点方向箭头淡入（颜色随交通方式）
@@ -1608,12 +1757,24 @@ function showPlayMarker(city) {
     interactive: false,
   }).addTo(_playGroup);
 }
+// 播放期锁地图交互；退出时按进入前状态精确恢复（doubleClickZoom 初始是关闭的）
+let _mapLockSaved = null;
 function setMapLock(lock) {
-  if (!map) return;   // 地图未就绪（CDN 失败等）时不加锁
-  const m = lock ? 'disable' : 'enable';
-  ['dragging', 'scrollWheelZoom', 'doubleClickZoom', 'boxZoom', 'keyboard', 'touchZoom'].forEach(k => {
-    if (map[k] && map[k][m]) map[k][m]();
-  });
+  if (!map) return;
+  const keys = ['dragging', 'scrollWheelZoom', 'doubleClickZoom', 'boxZoom', 'keyboard', 'touchZoom'];
+  if (lock) {
+    if (!_mapLockSaved) _mapLockSaved = {};
+    keys.forEach(k => { if (map[k] && map[k].enabled) _mapLockSaved[k] = map[k].enabled(); });
+    keys.forEach(k => { if (map[k] && map[k].disable) map[k].disable(); });
+  } else {
+    const saved = _mapLockSaved || {};
+    keys.forEach(k => {
+      if (!map[k]) return;
+      if (saved[k] === false) { if (map[k].disable) map[k].disable(); }
+      else { if (map[k].enable) map[k].enable(); }
+    });
+    _mapLockSaved = null;
+  }
 }
 function updatePlayProgress(idx, total) {
   const el = document.getElementById('play-progress');
@@ -1637,6 +1798,14 @@ function updatePlayStats() {
   const m = LEGS.filter(l => l.tripId === tripId).length;
   document.getElementById('play-stats').textContent = `该行程：${n} 个城市 · ${m} 段交通`;
 }
+// 播放期隐藏业务图层，减少 DOM/绘制；收尾再恢复
+function hideLayersForPlay() {
+  const st = _play;
+  st.hidden = [];
+  [layerGroup, _outlineLayer, _cityLayer].forEach(layer => {
+    if (layer && map.hasLayer(layer)) { map.removeLayer(layer); st.hidden.push(layer); }
+  });
+}
 // 启动播放：一次性预读全部数据进内存，播放期间零查询、零图层重建
 function startPlay(tripId) {
   if (_play && _play.running) exitPlay();
@@ -1645,34 +1814,67 @@ function startPlay(tripId) {
   if (!seq.length) { toast('该行程暂无城市，无法播放'); return; }
   if (_drillAdcode) backToChina();
   closeAllDrawers();
+  if (map.stop) map.stop();
   setMapLock(true);
   if (_legGroup) map.removeLayer(_legGroup);   // 播放期间隐藏业务连线，用动画线代替
   if (_wishGroup) map.removeLayer(_wishGroup); // 播放视图专注轨迹
   _playGroup = L.layerGroup().addTo(map);
   const speed = parseFloat(document.getElementById('play-speed').value) || 1;
-  const segs = buildSegments(seq);                       // 预读：城市坐标/路径点/颜色全部进内存
+  const segs = buildSegments(seq);
   const { phases, total } = buildTimeline(seq, segs);
   map.options.zoomSnap = 0;                              // 播放期支持连续缩放，收尾恢复
+  _prefetched.clear(); _prefetchQueue.length = 0;
   _play = {
     running: true, paused: false, speed, tripId, seq, segs, phases, total,
     introTo: segs[0] ? { lat: segs[0].from[0], lng: segs[0].from[1] } : seq[0],   // 开场飞向进出场段起点（常驻地）或首城
-    t: 0, zoom: map.getZoom(), zoomStart: map.getZoom(), zoomStartCam: map.getCenter(),
-    phaseKey: '', last: performance.now(), raf: 0,
+    introZoom: segs[0] ? segs[0].zoom : playZoomFor(null, seq[0]),
+    t: 0, zoom: map.getZoom(), phaseKey: '', last: performance.now(), raf: 0, fillAt: 0,
+    tileZoomUpdate: [_tileLight, _tileDark].map(l => l ? l.options.updateWhenZooming : null),
   };
+  hideLayersForPlay();
+  throttleTileUpdates();
+  // 播放期变焦只在停留/开场/收尾发生；关掉“变焦过程中逐级加载瓦片”，到目标级别后一次加载，
+  // 避免 flyTo 从 z4→z10 时把 z5/z6/.../z9 的瓦片全部拉一遍。
+  [_tileLight, _tileDark].forEach(l => { if (l) l.options.updateWhenZooming = false; });
   document.getElementById('play-pause').textContent = '⏸ 暂停';
+  const fill = document.getElementById('play-fill');
+  if (fill) fill.style.width = '0%';
+  updatePlayProgress(0, seq.length);
+  setPlayStatus('准备出发…');
   setPlayBar(true);
   _play.raf = requestAnimationFrame(playLoop);
 }
 // 收尾：清除播放图层组与光点，恢复地图交互与业务图层；rAF 全部取消
 function finishPlay() {
-  if (_play && _play.raf) { cancelAnimationFrame(_play.raf); _play.raf = 0; }
-  if (_play) _play.running = false;
+  const st = _play;
+  if (st && st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
+  if (map && map.stop) map.stop();
+  // 自然结束时确保落在完整行程视野（flyTo 偶有最后一帧未走完）
+  if (st && st.naturalEnd && st.endCenter && st.endTarget != null) {
+    map.setView(st.endCenter, st.endTarget, { animate: false });
+  }
+  if (st) st.running = false;
   if (_playGroup) { map.removeLayer(_playGroup); _playGroup = null; }
+  restoreTileUpdates();
+  if (st && st.hidden) {
+    st.hidden.forEach(layer => { if (layer && !map.hasLayer(layer)) map.addLayer(layer); });
+    st.hidden = null;
+  }
+  if (st && st.tileZoomUpdate) {
+    [_tileLight, _tileDark].forEach((l, i) => { if (l) l.options.updateWhenZooming = st.tileZoomUpdate[i] == null ? true : st.tileZoomUpdate[i]; });
+    st.tileZoomUpdate = null;
+  }
   if (_legGroup && !map.hasLayer(_legGroup)) map.addLayer(_legGroup);   // 恢复业务连线 = 完整轨迹
   if (_wishGroup && !map.hasLayer(_wishGroup)) map.addLayer(_wishGroup);
   map.options.zoomSnap = 1;
   setMapLock(false);
   setPlayBar(false);
+  const fill = document.getElementById('play-fill');
+  if (fill) fill.style.width = '0%';
+  setPlayStatus('');
+  // 播放期跳过了标签避让/气泡显隐，结束后补一次
+  updateBubbleVisibility();
+  resolveCityLabelOverlap();
 }
 function exitPlay() {
   finishPlay();
@@ -2488,10 +2690,21 @@ function bindPhotos() {
 }
 
 /* ===== 设置：常驻城市 / 导出 / 导入 / 清空 ===== */
+// 登录态/数据来源：让用户一眼确认当前读到的是云端还是本机
+function renderAuthInfo() {
+  const el = document.getElementById('auth-info');
+  if (!el) return;
+  if (!window._sbUser) {
+    el.textContent = '👤 当前：游客模式（数据仅存本机浏览器，登录后自动上传云端）';
+    return;
+  }
+  el.textContent = `👤 已登录 ${window._sbUser.email}｜当前显示：行程 ${TRIPS.length} / 城市 ${STOPS.length} / 交通段 ${LEGS.length} / 日记 ${DIARIES.length} / 心愿 ${WISHES.length}`;
+}
 // 数据统计条 + 备份提醒（距上次导出超过 30 天或从未导出时显示）
 async function renderStats() {
   const el = document.getElementById('stats-bar');
   if (el) el.textContent = `📊 行程 ${TRIPS.length} ｜ 城市 ${STOPS.length} ｜ 交通段 ${LEGS.length} ｜ 日记 ${DIARIES.length} ｜ 照片 ${_photoIndex.length}`;
+  renderAuthInfo();
   const tip = document.getElementById('backup-tip');
   if (!tip) return;
   let last = null;
@@ -2564,14 +2777,16 @@ function bindSettings() {
     const old = btnSyncUp.textContent; btnSyncUp.textContent = '上传中…';
     try {
       const m = await window.mergeLocalToCloud();
+      const errs = (m.errors || []).slice(0, 2).join('；');
       if (m.up) {
         await reload();
-        toast(`本机记录已上传云端 ${m.up} 条` + (m.fail ? `，失败 ${m.fail} 条（可再点一次重试）` : ''));
+        toast(`本机记录已上传云端 ${m.up} 条` + (m.fail ? `，失败 ${m.fail} 项（可再点一次重试）` : '') + (errs ? `｜${errs}` : ''));
       } else if (m.fail) {
-        toast(`上传失败 ${m.fail} 条（网络波动），请稍后重试`);
+        toast(`上传失败 ${m.fail} 项` + (errs ? `｜${errs}` : '') + '，请稍后重试');
       } else {
         toast('本机数据已全部在云端，无需上传');
       }
+      renderAuthInfo();
     } catch (e) {
       toast('上传失败：' + e.message);
     }
@@ -2611,7 +2826,8 @@ function bindSettings() {
   if (window._sbUser) {   // 启动时已登录：自动执行一次本机→云端迁移（幂等，云端同 id 跳过）
     window.mergeLocalToCloud().then(async m => {
       if (m.up) await reload();   // 有新增才刷新
-      if (m.up || m.fail) toast(`本机记录已上传云端 ${m.up} 条` + (m.fail ? `，失败 ${m.fail} 条（设置里可手动重传）` : ''));
+      const errs = (m.errors || []).slice(0, 2).join('；');
+      if (m.up || m.fail) toast(`本机记录已上传云端 ${m.up} 条` + (m.fail ? `，失败 ${m.fail} 项（设置里可手动重传）` : '') + (errs ? `｜${errs}` : ''));
     }).catch(e => console.warn('[footprint] 启动迁移失败：', e));
     window.syncAllPhotos().then(r => {   // 补一次照片双向同步
       if (r.up || r.down || r.fail) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张（下次登录自动补传）` : ''));
@@ -2626,7 +2842,8 @@ function bindSettings() {
       catch (e) { console.warn('[footprint] 本机数据合并失败：', e); }
       const c = await window.startApp();
       const cnt = c ? `（云端：行程 ${c.trips} / 城市 ${c.stops} / 交通段 ${c.legs} / 日记 ${c.diaries} / 心愿 ${c.wish}）` : '';
-      toast('已登录，数据已切换为云端同步' + (merged.up ? `，本机记录已上传云端 ${merged.up} 条` : '') + (merged.fail ? `，上传失败 ${merged.fail} 条（设置里可手动重传）` : '') + ' ' + cnt);
+      const errs = (merged.errors || []).slice(0, 2).join('；');
+      toast('已登录，数据已切换为云端同步' + (merged.up ? `，本机记录已上传云端 ${merged.up} 条` : '') + (merged.fail ? `，失败 ${merged.fail} 项（设置里可手动重传）` : '') + (errs ? `｜${errs}` : '') + ' ' + cnt);
       const r = await window.syncAllPhotos();
       if (r.up || r.down || r.fail) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张（下次登录自动补传）` : ''));
     } catch (err) {

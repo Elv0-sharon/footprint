@@ -232,6 +232,7 @@
         <div id="backup-tip" class="backup-tip" hidden>⚠️ 建议导出 JSON 备份，防止清缓存丢失</div>
         <div id="auth-info" class="stats-bar"></div>
         <p>文字数据与照片均保存在 Supabase 云端（按账号隔离，登录后多设备自动同步）；照片文件另在本机缓存一份。导出/导入包含行程、城市、交通段、点亮状态与心情日记。</p>
+        <p class="hint">提示：请固定使用 <b>footprint.elv0-sharon.deno.net</b> 一个站点登录；本地文件（file://）与网站是两套独立存储。若旧数据在本地文件里，先在本地文件「导出全部 JSON」，再在本站登录后「从 JSON 导入」即可上传云端。</p>
         <form id="form-home-city" class="home-city-form">
           <span class="field-label">常驻城市（交通段下拉置顶项，不占用城市列表）</span>
           <label>名称<input name="name" placeholder="如：广州"></label>
@@ -318,7 +319,7 @@
         <label class="file-btn primary">添加照片
           <input type="file" id="photo-input" accept="image/*" multiple hidden>
         </label>
-        <span class="hint">自动压缩：长边 1600px / JPEG 0.8，仅存本机</span>
+        <span class="hint">自动压缩：长边 1600px / JPEG 0.8，登录后同步云端</span>
         <span class="hint" id="photo-count"></span>
       </div>
       <div id="photo-empty" class="empty" hidden>该城市还没有照片</div>
@@ -371,8 +372,10 @@
       <option value="1" selected>1x</option>
       <option value="2">2x</option>
     </select>
+    <span id="play-status" class="play-status"></span>
     <span id="play-progress" class="play-progress"></span>
     <button id="play-exit" class="play-btn play-danger">退出播放</button>
+    <div class="play-track"><div id="play-fill" class="play-fill"></div></div>
   </div>
 
   <script src="js/vendor/leaflet.js"></script>

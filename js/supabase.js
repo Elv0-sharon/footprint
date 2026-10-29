@@ -4,6 +4,11 @@
 const SUPABASE_URL = 'https://footprint.elv0-sharon.deno.net/sb';
 const SUPABASE_KEY = 'sb_publishable_R6qwy1DK5nWDzD9EOfWm8w_Sc6cY8O6';
 const AUTH_REDIRECT = 'https://elv0-sharon.github.io/footprint/';
+// 注册确认邮件回到“当前正在使用的站点”（deno.net / github.io），避免确认后在另一个 origin 登录；
+// file:// 无法接收回调，回退到 Pages。
+function authRedirectUrl() {
+  return /^https?:$/.test(location.protocol) ? location.origin + location.pathname : AUTH_REDIRECT;
+}
 
 // detectSessionInUrl: true → 页面加载时自动处理魔法链接回调（hash 中 token 换取会话）
 let sb = null;
@@ -15,6 +20,13 @@ if (typeof supabase === 'undefined') {
   });
 }
 let _sbUser = null;
+// 顶层 let 不会挂到 window 上；db.js / app.js 用 window._sbUser 判断登录态，
+// 所有登录态变更必须走 setSbUser() 同步，否则登录后读写仍会落回本机 IndexedDB。
+function setSbUser(u) {
+  _sbUser = u || null;
+  window._sbUser = _sbUser;
+}
+setSbUser(null);
 window._appStarted = false;
 window._authReady = new Promise(r => { window._authReadyResolve = r; });
 
@@ -190,7 +202,7 @@ window.unmirrorPhoto = async function (id) {
 
 // 登录合并：把游客期间录入的本机数据（按 id 去重）并入云端，手机等其它设备登录同一账号即可看到
 window.mergeLocalToCloud = async function () {
-  if (!sb || !_sbUser || !DB.getLocalAll) return { up: 0, fail: 0 };
+  if (!sb || !_sbUser || !DB.getLocalAll) return { up: 0, fail: 0, errors: [] };
   const uid = _sbUser.id;
   const local = await DB.getLocalAll();
   const plan = [
@@ -198,20 +210,31 @@ window.mergeLocalToCloud = async function () {
     ['diaries', d => SBCloud.putDiary(d)], ['wishlist', w => SBCloud.putWish(w)],
   ];
   let up = 0, fail = 0;
+  const errors = [];
   for (const [table, put] of plan) {          // 顺序 trips→stops→legs 满足外键依赖
     let cloudIds = new Set();
     try {
       const { data, error } = await authRetry(() => sb.from(table).select('id').eq('user_id', uid));
       if (error) throw error;
       cloudIds = new Set((data || []).map(r => r.id));
-    } catch (e) { console.warn('[footprint] 合并读取云端失败：', table, e); continue; }
+    } catch (e) {
+      // 读不到云端已有 id 时不能再静默跳过：如实上报，避免“看起来成功但一条没传”
+      console.warn('[footprint] 合并读取云端失败：', table, e);
+      errors.push(`${table} 读取云端失败：${(e && (e.message || e.code)) || e}`);
+      fail++;
+      continue;
+    }
     for (const item of (local[table] || [])) {
       if (!item || !item.id || cloudIds.has(item.id)) continue;   // 云端已有同 id：不动
       try { await put(item); up++; }
-      catch (e) { console.warn('[footprint] 合并上传失败：', table, item.id, e); fail++; }
+      catch (e) {
+        console.warn('[footprint] 合并上传失败：', table, item.id, e);
+        errors.push(`${table} ${item.id}：${(e && (e.message || e.code)) || e}`);
+        fail++;
+      }
     }
   }
-  return { up, fail };
+  return { up, fail, errors };
 };
 
 // 双向同步：本地多出的自动上传，云端多出的自动下载到本机缓存；完成后刷新索引/封面/地图
@@ -321,7 +344,7 @@ async function doSignup() {
   msg.textContent = '注册中…（网络不稳会自动重试）';
   const { data, error } = await authRetry(() => sb.auth.signUp({
     email, password: pw,
-    options: { emailRedirectTo: AUTH_REDIRECT },
+    options: { emailRedirectTo: authRedirectUrl() },
   }));
   if (error) { msg.textContent = '注册失败：' + netErrMsg(error); return; }
   if (data.session) {
@@ -370,13 +393,13 @@ async function sbInit() {
   try {
     const { data, error } = await sb.auth.getSession();
     if (error) throw error;
-    _sbUser = data.session ? data.session.user : null;
+    setSbUser(data.session ? data.session.user : null);
   } catch (e) {
     console.warn('[footprint] Supabase 会话恢复失败：', e.message);
-    _sbUser = null;
+    setSbUser(null);
   }
   sb.auth.onAuthStateChange((event, session) => {
-    _sbUser = session ? session.user : null;
+    setSbUser(session ? session.user : null);
     updateAuthUI();
     if (event === 'SIGNED_IN') {
       closeLoginModal();

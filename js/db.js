@@ -60,17 +60,55 @@ function _clear(store) {
   }));
 }
 
+/* ---- 登录态路由：云端优先；云端失败时回退/保留本机副本，避免“登录后反而丢数据” ---- */
+const _cloudOn = () => !!(window._sbUser && window.SBCloud);
+let _lastCloudToast = 0;
+function warnCloud(msg, e) {
+  console.warn('[footprint] ' + msg, e);
+  if (typeof toast !== 'function') return;
+  const now = Date.now();
+  if (now - _lastCloudToast < 5000) return;   // 首屏五表并发失败时只提示一次
+  _lastCloudToast = now;
+  toast(msg + '：' + ((e && (e.message || e.code)) || e));
+}
+async function readCloudOrLocal(store, cloudFn) {
+  if (!_cloudOn()) return _getAll(store);
+  try { return await cloudFn(); }
+  catch (e) {
+    warnCloud('云端读取失败，已显示本机缓存', e);
+    return _getAll(store);
+  }
+}
+async function putCloudAndLocal(store, cloudFn, item) {
+  if (!_cloudOn()) return _put(store, item);
+  await _put(store, item);          // 先落本机，云端失败也不丢数据
+  try { await cloudFn(item); }
+  catch (e) {
+    warnCloud('已保存到本机，云端同步失败（可在设置里重试）', e);
+    throw e;                        // 让调用方知道云端没成功（本机副本已保留）
+  }
+}
+async function delCloudAndLocal(store, key, cloudFn) {
+  if (!_cloudOn()) return _del(store, key);
+  try { await cloudFn(key); }
+  catch (e) {
+    warnCloud('云端删除失败，本机数据已保留', e);
+    throw e;
+  }
+  await _del(store, key);
+}
+
 const DB = {
   // 五类数据：登录后走 Supabase 云端（SBCloud），游客/照片/点亮/配置走本地 IndexedDB
-  getTrips: () => (window.SBCloud && window._sbUser ? SBCloud.getTrips() : _getAll('trips')),
-  getStops: () => (window.SBCloud && window._sbUser ? SBCloud.getStops() : _getAll('stops')),
-  getLegs:  () => (window.SBCloud && window._sbUser ? SBCloud.getLegs()  : _getAll('legs')),
-  putTrip:  (t) => (window.SBCloud && window._sbUser ? SBCloud.putTrip(t) : _put('trips', t)),
-  putStop:  (s) => (window.SBCloud && window._sbUser ? SBCloud.putStop(s) : _put('stops', s)),
-  putLeg:   (l) => (window.SBCloud && window._sbUser ? SBCloud.putLeg(l)  : _put('legs',  l)),
-  delTrip:  (id) => (window.SBCloud && window._sbUser ? SBCloud.delTrip(id) : _del('trips', id)),
-  delStop:  (id) => (window.SBCloud && window._sbUser ? SBCloud.delStop(id) : _del('stops', id)),
-  delLeg:   (id) => (window.SBCloud && window._sbUser ? SBCloud.delLeg(id)  : _del('legs',  id)),
+  getTrips: () => readCloudOrLocal('trips', () => SBCloud.getTrips()),
+  getStops: () => readCloudOrLocal('stops', () => SBCloud.getStops()),
+  getLegs:  () => readCloudOrLocal('legs',  () => SBCloud.getLegs()),
+  putTrip:  (t) => putCloudAndLocal('trips', t => SBCloud.putTrip(t), t),
+  putStop:  (s) => putCloudAndLocal('stops', s => SBCloud.putStop(s), s),
+  putLeg:   (l) => putCloudAndLocal('legs',  l => SBCloud.putLeg(l),  l),
+  delTrip:  (id) => delCloudAndLocal('trips', id, id => SBCloud.delTrip(id)),
+  delStop:  (id) => delCloudAndLocal('stops', id, id => SBCloud.delStop(id)),
+  delLeg:   (id) => delCloudAndLocal('legs',  id, id => SBCloud.delLeg(id)),
 
   // 手动点亮集合
   getVisitedProvinces: () => _getAll('visitedProvinces').then(list => list.map(r => r.name)),
@@ -81,9 +119,9 @@ const DB = {
   delVisitedCity:      (name) => _del('visitedCities', name),
 
   // 心情日记
-  getDiaries: () => (window.SBCloud && window._sbUser ? SBCloud.getDiaries() : _getAll('diaries')),
-  putDiary:   (d) => (window.SBCloud && window._sbUser ? SBCloud.putDiary(d) : _put('diaries', d)),
-  delDiary:   (id) => (window.SBCloud && window._sbUser ? SBCloud.delDiary(id) : _del('diaries', id)),
+  getDiaries: () => readCloudOrLocal('diaries', () => SBCloud.getDiaries()),
+  putDiary:   (d) => putCloudAndLocal('diaries', d => SBCloud.putDiary(d), d),
+  delDiary:   (id) => delCloudAndLocal('diaries', id, id => SBCloud.delDiary(id)),
 
   // 通用配置（键值对，如常驻城市）
   getConfig: (key) => openDB().then(db => new Promise((resolve, reject) => {
@@ -94,9 +132,9 @@ const DB = {
   putConfig: (rec) => _put('config', rec),
 
   // 心愿清单
-  getWishlist: () => (window.SBCloud && window._sbUser ? SBCloud.getWishlist() : _getAll('wishlist')),
-  putWish:  (w) => (window.SBCloud && window._sbUser ? SBCloud.putWish(w) : _put('wishlist', w)),
-  delWish:  (id) => (window.SBCloud && window._sbUser ? SBCloud.delWish(id) : _del('wishlist', id)),
+  getWishlist: () => readCloudOrLocal('wishlist', () => SBCloud.getWishlist()),
+  putWish:  (w) => putCloudAndLocal('wishlist', w => SBCloud.putWish(w), w),
+  delWish:  (id) => delCloudAndLocal('wishlist', id, id => SBCloud.delWish(id)),
 
   // 站点照片（Blob 仅存本机，不参与 JSON 导入导出）
   getPhotoIndex: () => openDB().then(db => new Promise((resolve, reject) => {
@@ -131,7 +169,7 @@ const DB = {
 
   // 用户主动"清空全部数据"：连照片一起清；登录状态同时清空云端，防止刷新/重登后被同步回来
   clearAll: async () => {
-    if (window.SBCloud && window._sbUser) {
+    if (_cloudOn()) {
       try {
         await SBCloud.clearPhotos();   // 云端照片（元数据+Storage）先清，避免双向同步回填
         await SBCloud.clearAll();      // 云端五表
@@ -162,9 +200,10 @@ const DB = {
     if (!data || !Array.isArray(data.trips) || !Array.isArray(data.stops) || !Array.isArray(data.legs)) {
       throw new Error('JSON 结构不正确（需包含 trips/stops/legs 数组）');
     }
-    // 五类数据：登录时云端覆盖当前账号（SBCloud.importAll）；游客只写本地五表
-    if (window.SBCloud && window._sbUser) await SBCloud.importAll(data);
-    else { await _clear('trips'); await _clear('stops'); await _clear('legs'); await _clear('diaries'); await _clear('wishlist'); }
+    // 五类数据：登录时先覆盖云端当前账号（失败会抛出，本机数据此时还没动）；
+    // 成功后把导入内容同步写回本机五表，作为离线缓存。
+    if (_cloudOn()) await SBCloud.importAll(data);
+    await _clear('trips'); await _clear('stops'); await _clear('legs'); await _clear('diaries'); await _clear('wishlist');
     for (const t of (data.trips || [])) await _put('trips', t);
     for (const s of (data.stops || [])) await _put('stops', s);
     for (const l of (data.legs || [])) await _put('legs', l);
