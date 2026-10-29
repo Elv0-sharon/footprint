@@ -59,18 +59,18 @@ function mkCrud(table, toRow, fromRow) {
   return {
     async getAll() {
       const uid = await requireUser();
-      const { data, error } = await sb.from(table).select('*').eq('user_id', uid);
+      const { data, error } = await authRetry(() => sb.from(table).select('*').eq('user_id', uid));
       if (error) throw error;
       return (data || []).map(fromRow);
     },
     async put(item) {
       const uid = await requireUser();
-      const { error } = await sb.from(table).upsert(toRow(item, uid));
+      const { error } = await authRetry(() => sb.from(table).upsert(toRow(item, uid)));
       if (error) throw error;
     },
     async del(id) {
       await requireUser();
-      const { error } = await sb.from(table).delete().eq('id', id);
+      const { error } = await authRetry(() => sb.from(table).delete().eq('id', id));
       if (error) throw error;
     },
   };
@@ -100,7 +100,7 @@ const SBCloud = {
   async importAll(data) {
     const uid = await requireUser();
     for (const table of ['trips', 'stops', 'legs', 'diaries', 'wishlist']) {
-      const { error } = await sb.from(table).delete().eq('user_id', uid);
+      const { error } = await authRetry(() => sb.from(table).delete().eq('user_id', uid));
       if (error) throw error;
     }
     for (const t of (data.trips || [])) await this.trips.put(t);
