@@ -1,6 +1,6 @@
 /* IndexedDB 封装：trips / stops / legs / diaries / visitedProvinces / visitedCities / photos */
 const DB_NAME = 'footprintDB';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 let _dbPromise = null;
 
 function openDB() {
@@ -20,6 +20,7 @@ function openDB() {
         ps.createIndex('stopId', 'stopId', { unique: false });
       }
       if (!db.objectStoreNames.contains('config')) db.createObjectStore('config', { keyPath: 'key' });
+      if (!db.objectStoreNames.contains('wishlist')) db.createObjectStore('wishlist', { keyPath: 'id' });
     };
     req.onsuccess = (e) => resolve(e.target.result);
     req.onerror   = (e) => reject(e.target.error);
@@ -60,15 +61,16 @@ function _clear(store) {
 }
 
 const DB = {
-  getTrips: () => _getAll('trips'),
-  getStops: () => _getAll('stops'),
-  getLegs:  () => _getAll('legs'),
-  putTrip:  (t) => _put('trips', t),
-  putStop:  (s) => _put('stops', s),
-  putLeg:   (l) => _put('legs',  l),
-  delTrip:  (id) => _del('trips', id),
-  delStop:  (id) => _del('stops', id),
-  delLeg:   (id) => _del('legs',  id),
+  // 五类数据：登录后走 Supabase 云端（SBCloud），照片/点亮/配置仍走 IndexedDB
+  getTrips: () => (window.SBCloud ? SBCloud.getTrips() : _getAll('trips')),
+  getStops: () => (window.SBCloud ? SBCloud.getStops() : _getAll('stops')),
+  getLegs:  () => (window.SBCloud ? SBCloud.getLegs()  : _getAll('legs')),
+  putTrip:  (t) => (window.SBCloud ? SBCloud.putTrip(t) : _put('trips', t)),
+  putStop:  (s) => (window.SBCloud ? SBCloud.putStop(s) : _put('stops', s)),
+  putLeg:   (l) => (window.SBCloud ? SBCloud.putLeg(l)  : _put('legs',  l)),
+  delTrip:  (id) => (window.SBCloud ? SBCloud.delTrip(id) : _del('trips', id)),
+  delStop:  (id) => (window.SBCloud ? SBCloud.delStop(id) : _del('stops', id)),
+  delLeg:   (id) => (window.SBCloud ? SBCloud.delLeg(id)  : _del('legs',  id)),
 
   // 手动点亮集合
   getVisitedProvinces: () => _getAll('visitedProvinces').then(list => list.map(r => r.name)),
@@ -79,9 +81,9 @@ const DB = {
   delVisitedCity:      (name) => _del('visitedCities', name),
 
   // 心情日记
-  getDiaries: () => _getAll('diaries'),
-  putDiary:   (d) => _put('diaries', d),
-  delDiary:   (id) => _del('diaries', id),
+  getDiaries: () => (window.SBCloud ? SBCloud.getDiaries() : _getAll('diaries')),
+  putDiary:   (d) => (window.SBCloud ? SBCloud.putDiary(d) : _put('diaries', d)),
+  delDiary:   (id) => (window.SBCloud ? SBCloud.delDiary(id) : _del('diaries', id)),
 
   // 通用配置（键值对，如常驻城市）
   getConfig: (key) => openDB().then(db => new Promise((resolve, reject) => {
@@ -90,6 +92,11 @@ const DB = {
     req.onerror   = () => reject(req.error);
   })),
   putConfig: (rec) => _put('config', rec),
+
+  // 心愿清单
+  getWishlist: () => (window.SBCloud ? SBCloud.getWishlist() : _getAll('wishlist')),
+  putWish:  (w) => (window.SBCloud ? SBCloud.putWish(w) : _put('wishlist', w)),
+  delWish:  (id) => (window.SBCloud ? SBCloud.delWish(id) : _del('wishlist', id)),
 
   // 站点照片（Blob 仅存本机，不参与 JSON 导入导出）
   getPhotoIndex: () => openDB().then(db => new Promise((resolve, reject) => {
@@ -134,24 +141,21 @@ const DB = {
     visitedCities: await _getAll('visitedCities'),
     diaries: await _getAll('diaries'),
     homeCity: (await _getAll('config')).find(r => r.key === 'homeCity') || null,
+    wishlist: await _getAll('wishlist'),
   }),
 
   importAll: async (data) => {
     if (!data || !Array.isArray(data.trips) || !Array.isArray(data.stops) || !Array.isArray(data.legs)) {
       throw new Error('JSON 结构不正确（需包含 trips/stops/legs 数组）');
     }
+    // 五类数据：云端覆盖当前账号（SBCloud.importAll）
+    if (window.SBCloud) await SBCloud.importAll(data);
+    // 点亮集合/常驻城市配置仍走本地 IndexedDB
     const vp = Array.isArray(data.visitedProvinces) ? data.visitedProvinces : [];
     const vc = Array.isArray(data.visitedCities) ? data.visitedCities : [];
-    const di = Array.isArray(data.diaries) ? data.diaries : [];
-    // 导入只覆盖文字数据，照片 Blob 不参与导入，保持不动
-    await _clear('trips'); await _clear('stops'); await _clear('legs');
-    await _clear('visitedProvinces'); await _clear('visitedCities'); await _clear('diaries');
-    for (const t of data.trips) await _put('trips', t);
-    for (const s of data.stops) await _put('stops', s);
-    for (const l of data.legs)  await _put('legs',  l);
+    await _clear('visitedProvinces'); await _clear('visitedCities');
     for (const n of vp) if (n) await _put('visitedProvinces', { name: n });
     for (const c of vc) if (c && c.name) await _put('visitedCities', c);
-    for (const d of di) if (d && d.id) await _put('diaries', d);
     if (data.homeCity && data.homeCity.name != null) await _put('config', data.homeCity);
   },
 };

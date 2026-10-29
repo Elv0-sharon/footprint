@@ -1,14 +1,15 @@
 /* ===== 全局状态 & 工具 ===== */
-let TRIPS = [], STOPS = [], LEGS = [], DIARIES = [];
+let TRIPS = [], STOPS = [], LEGS = [], DIARIES = [], WISHES = [];
 let VISITED_PROVINCES = [];  // 手动点亮省名数组
 let VISITED_CITIES = [];     // 手动点亮城市 [{name, region, lat, lng}]
-let map, layerGroup, _legGroup = null, provinceLayer = null, _cityLayer = null, _outlineLayer = null;
+let map, layerGroup, _legGroup = null, _wishGroup = null, provinceLayer = null, _cityLayer = null, _outlineLayer = null;
 let _mapReady = false;
 let _highlightMode = false;
 let _drillAdcode = null, _drillProvName = null, _cityGeo = null;
 const _cityGeoCache = new Map();
 let _editingDiaryId = null;
-let _editingTripId = null, _editingStopId = null, _editingLegId = null;
+let _editingTripId = null, _editingStopId = null, _editingLegId = null, _editingWishId = null;
+let _legDirty = false;   // Leg 编辑表单是否有改动（控制"添加返程"按钮可用）
 
 /* 照片模块状态 */
 let _photoStopId = null, _stopPhotos = [], _thumbUrls = [];
@@ -22,7 +23,7 @@ let _pcStopId = null, _pcPhotos = [], _pcUrls = [], _pcIdx = 0;
 
 /* 主题状态（light / dark），持久化到 localStorage */
 let _theme = 'light';
-let _tileLayer = null;
+let _tileLight = null, _tileDark = null, _tilesReady = false, _darkFallbackDone = false;
 const TILE_URLS = {
   light: 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}',
   dark:  'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=6&x={x}&y={y}&z={z}',
@@ -45,26 +46,46 @@ function initTheme() {
   applyTheme(t === 'dark' ? 'dark' : 'light');
 }
 
-/* 按主题切换高德瓦片；暗色瓦片加载失败时回退浅色瓦片 + 深色遮罩兜底，不白屏 */
-function setTiles(mode) {
-  if (!_mapReady) return;
-  const mapEl = document.getElementById('map');
-  if (_tileLayer) { map.removeLayer(_tileLayer); _tileLayer = null; }
-  mapEl.classList.remove('tile-dark-mask');
-  let fallbackDone = false;
-  _tileLayer = L.tileLayer(TILE_URLS[mode], {
-    subdomains: '1234', maxZoom: 18, attribution: '© 高德地图 GS(2023)4197号',
+/* 瓦片层：初始化时浅/深两层一次性创建，切换主题只切可见性，绝不 new / 移除重建 */
+function createTileLayers() {
+  if (_tilesReady) return;
+  const opts = { subdomains: '1234', maxZoom: 18, attribution: '© 高德地图 GS(2023)4197号' };
+  _tileLight = L.tileLayer(TILE_URLS.light, opts);
+  _tileDark = L.tileLayer(TILE_URLS.dark, opts);
+  [_tileLight, _tileDark].forEach(layer => {
+    layer.on('tileerror', (e) => {
+      const tile = e.tile;
+      if (tile && !tile.dataset.retried) {   // 单个瓦片加载失败自动重试一次
+        tile.dataset.retried = '1';
+        const url = tile.src;
+        setTimeout(() => { tile.src = url + (url.includes('?') ? '&' : '?') + 'fpRetry=1'; }, 300);
+      }
+    });
   });
-  _tileLayer.on('tileerror', () => {
-    if (fallbackDone || mode !== 'dark') return;
-    fallbackDone = true;
+  // 保留暗色兜底：暗色层整体不可用时回退浅色瓦片 + 深色遮罩，不白屏
+  _tileDark.on('tileerror', () => {
+    if (_darkFallbackDone) return;
+    _darkFallbackDone = true;
     console.warn('[footprint] 暗色瓦片加载失败，回退浅色瓦片并加深色遮罩兜底');
-    setTiles('light');
-    mapEl.classList.add('tile-dark-mask');
+    if (map.hasLayer(_tileDark)) map.removeLayer(_tileDark);
+    if (!map.hasLayer(_tileLight)) _tileLight.addTo(map);
+    _tileLight.bringToBack();
+    document.getElementById('map').classList.add('tile-dark-mask');
     toast('暗色瓦片不可用，已用深色遮罩兜底');
   });
-  _tileLayer.addTo(map);
-  _tileLayer.bringToBack();
+  _tilesReady = true;
+}
+
+/* 按主题显示对应瓦片层（两层均为初始化时创建的常驻对象） */
+function setTiles(mode) {
+  if (!_mapReady) return;
+  createTileLayers();
+  const show = mode === 'dark' ? _tileDark : _tileLight;
+  const hide = mode === 'dark' ? _tileLight : _tileDark;
+  const mapEl = document.getElementById('map');
+  mapEl.classList.toggle('tile-dark-mask', mode === 'dark' && _darkFallbackDone);
+  if (map.hasLayer(hide)) map.removeLayer(hide);
+  if (!map.hasLayer(show)) { show.addTo(map); show.bringToBack(); }
 }
 
 /* 省界/地市点亮配色随主题（浅色墨绿 / 深色暖橙调 + 亮绿描边） */
@@ -99,6 +120,7 @@ function legStyle(mode) {
 /* 圆点自定义颜色（8 色预设色板） */
 const MARKER_COLORS = ['#2E7D63', '#C99A45', '#B34532', '#f0a35e', '#d4677f', '#3d5a6c', '#7a6aa8', '#8a8f8a'];
 const DEFAULT_MARKER_COLOR = '#2E7D63';
+const PHOTO_LIMIT = 30;   // 单个城市照片上限
 
 /* 全国城市坐标表来自 data/cities.js（window.CITIES：{name, province, lat, lng}），选择器见 initCityPicker() */
 
@@ -106,6 +128,18 @@ function uid() {
   return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('id-' + Date.now() + '-' + Math.random().toString(16).slice(2));
 }
 function fmt(v) { return v ? v : '—'; }
+// Leg 时间片段：仅展示存在的一侧（弹窗版：出发: a　到达: b），两端都空返回空串
+function legTimePopup(leg) {
+  const parts = [];
+  if (leg.departAt) parts.push('出发: ' + esc(leg.departAt));
+  if (leg.arriveAt) parts.push('到达: ' + esc(leg.arriveAt));
+  return parts.join('　');
+}
+// Leg 时间片段（时间线/列表版：a 到达 b），两端都空返回空串
+function legTimeLine(leg) {
+  if (!leg.departAt && !leg.arriveAt) return '';
+  return (leg.departAt ? esc(leg.departAt) : '') + (leg.arriveAt ? ' 到达 ' + esc(leg.arriveAt) : '');
+}
 function money(v) { return (v !== '' && v != null && !isNaN(v)) ? ('¥' + Number(v).toLocaleString()) : '—'; }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
 function toast(msg) {
@@ -142,6 +176,7 @@ async function loadAll() {
   });
   VISITED_PROVINCES = await DB.getVisitedProvinces();
   VISITED_CITIES = await DB.getVisitedCities();
+  WISHES = await DB.getWishlist();
   const hc = await DB.getConfig('homeCity');
   if (hc && hc.name) HOME_CITY = { name: hc.name, lat: Number(hc.lat), lng: Number(hc.lng) };
 }
@@ -155,6 +190,8 @@ async function reload() {
   renderTimeline();
   renderLists();
   renderDiaries();
+  renderWishes();
+  renderStats();   // 数据条数/备份提醒随数据变化刷新
 }
 function stopById(id) { return STOPS.find(s => s.id === id); }
 
@@ -186,13 +223,22 @@ function legCoords(p) {
 function initMap() {
   if (_mapReady) return;
   map = L.map('map', { zoomControl: true, doubleClickZoom: false }).setView([35, 105], 4);
-  setTiles(_theme);
+  // 初始化即创建浅/深两个瓦片层（对象常驻，切换主题绝不 new）
+  createTileLayers();
+  // 容器宽高可能晚于地图初始化就绪：DOM 就绪 + window load 各刷一次尺寸，确保瓦片铺满
+  setTimeout(() => { if (_mapReady && map) map.invalidateSize(); }, 0);
+  if (document.readyState === 'complete') {
+    setTimeout(() => { if (_mapReady && map) map.invalidateSize(); }, 0);
+  } else {
+    window.addEventListener('load', () => { if (_mapReady && map) map.invalidateSize(); });
+  }
   map.createPane('provincePane');
   map.getPane('provincePane').style.zIndex = 350;
   map.createPane('outlinePane');   // 省级外轮廓：压在地市边界之上、圆点之下
   map.getPane('outlinePane').style.zIndex = 360;
   layerGroup = L.layerGroup().addTo(map);   // 城市圆点/封面气泡
   _legGroup = L.layerGroup().addTo(map);    // 交通连线（独立图层组）
+  _wishGroup = L.layerGroup().addTo(map);   // 心愿星标（独立图层组）
   // Leaflet 会阻止弹窗内点击冒泡到 document，需在 popupopen 时单独绑弹窗内按钮
   map.on('popupopen', (e) => {
     const el = e.popup.getElement();
@@ -202,18 +248,23 @@ function initMap() {
   map.on('zoomend', () => { updateBubbleVisibility(); resolveCityLabelOverlap(); });
   updateBubbleVisibility();
   _mapReady = true;
+  setTiles(_theme);   // 就绪后立即显示当前主题瓦片层（此前这里缺失，首次打开瓦片不加载的根因）
   renderLegend();
   renderMap();
   ensureProvinceData().then(() => renderProvinces());
 }
 
-// 弧线控制点（中点抬高，形状与原 planeCurve 完全一致）
+// 弧线控制点：南→北（出发纬度低于到达）弧线向左（西侧）弯，反之向右（东侧）弯；偏移随间距自适应
 function curveCtrl(a, b) {
   const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
   const dx = b[1] - a[1], dy = b[0] - a[0];
   const len = Math.hypot(dx, dy) || 1;
   const lift = len * 0.18;
-  return [mid[0] + (-dy / len) * lift, mid[1] + (dx / len) * lift];
+  const p1 = [mid[0] + (-dy / len) * lift, mid[1] + (dx / len) * lift];   // 左侧候选
+  const p2 = [mid[0] + (dy / len) * lift, mid[1] + (-dx / len) * lift];   // 右侧候选
+  const west = p1[1] <= p2[1] ? p1 : p2;   // 经度小者为西
+  const east = p1[1] <= p2[1] ? p2 : p1;
+  return (a[0] < b[0]) ? west : east;
 }
 
 // plane 两点弧线（贝塞尔近似）；ctrl 可传入已算好的控制点
@@ -237,17 +288,17 @@ function bearingDeg(from, to) {
   return Math.atan2(dx, dy) * 180 / Math.PI;
 }
 
-// 连线末端（到达端）方向箭头：直线沿线方向，弧线沿终点附近切线；颜色随连线
+// 连线中部方向箭头：直线放几何中点，弧线放 t=0.5 处（按切线定向）；指向 to 端，颜色随连线
 function legArrow(a, b, ctrl, color) {
   let pos, angle;
   if (ctrl) {
-    const t = 0.9, u = 1 - t;
+    const t = 0.5, u = 1 - t;
     pos = [u * u * a[0] + 2 * u * t * ctrl[0] + t * t * b[0], u * u * a[1] + 2 * u * t * ctrl[1] + t * t * b[1]];
     const dLat = 2 * u * (ctrl[0] - a[0]) + 2 * t * (b[0] - ctrl[0]);
     const dLng = 2 * u * (ctrl[1] - a[1]) + 2 * t * (b[1] - ctrl[1]);
     angle = Math.atan2(dLng * Math.cos(pos[0] * Math.PI / 180), dLat) * 180 / Math.PI;
   } else {
-    pos = [a[0] + (b[0] - a[0]) * 0.9, a[1] + (b[1] - a[1]) * 0.9];
+    pos = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
     angle = bearingDeg(a, b);
   }
   L.marker(pos, {
@@ -268,19 +319,52 @@ function renderMap() {
     _legGroup.clearLayers();
     if (!_drillAdcode) {
       map.addLayer(_legGroup);
+      // 往返/重叠错开：相同城市对的直线连线分组，按序平行偏移（去程左偏、回程右偏、同向依次错开）
+      const groups = new Map();
       LEGS.forEach(leg => {
+        if (leg.mode === 'plane') return;   // 飞机弧线保持原有左右弯曲规则，不参与偏移
         const pa = legEndpoint(leg, 'from'), pb = legEndpoint(leg, 'to');
         const A = legCoords(pa), B = legCoords(pb);
+        if (!A || !B) return;
+        const key = [A, B].map(p => p[0].toFixed(2) + ',' + p[1].toFixed(2)).sort().join('|');
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push({ leg, A, B });
+      });
+      const offsets = new Map();
+      groups.forEach(list => {
+        list.sort((x, y) => (x.leg.departAt || '').localeCompare(y.leg.departAt || '') || x.leg.id.localeCompare(y.leg.id));
+        const n = list.length;
+        // 组内统一法向量：去程/回程分居两侧，同向多段依次错开
+        const dx = list[0].B[0] - list[0].A[0], dy = list[0].B[1] - list[0].A[1];
+        const dist = Math.hypot(dx, dy) || 1;
+        const nx = -dy / dist, ny = dx / dist;
+        const gap = Math.max(0.03, Math.min(0.6, dist * 0.03));   // 偏移随间距自适应：远微偏、近显偏
+        list.forEach((item, i) => {
+          const k = i - (n - 1) / 2;   // 相邻两条相距一个 gap
+          offsets.set(item.leg.id, {
+            A: [item.A[0] + nx * gap * k, item.A[1] + ny * gap * k],
+            B: [item.B[0] + nx * gap * k, item.B[1] + ny * gap * k],
+          });
+        });
+      });
+      LEGS.forEach(leg => {
+        const pa = legEndpoint(leg, 'from'), pb = legEndpoint(leg, 'to');
+        let A = legCoords(pa), B = legCoords(pb);
         if (!A || !B) return;   // 任一端缺坐标/无记录则不画该段，另一端不报错
         const st = legStyle(leg.mode);
         let pts, ctrl = null;
         if (leg.mode === 'plane') { ctrl = curveCtrl(A, B); pts = planeCurve(A, B, ctrl); }
-        else { pts = [A, B]; }
+        else {
+          const off = offsets.get(leg.id);
+          if (off) { A = off.A; B = off.B; }   // 偏移后的起止点，箭头随之中点偏移
+          pts = [A, B];
+        }
+        const tp = legTimePopup(leg);   // 时间为空的侧不显示
         // 全部实线，线宽 3
         L.polyline(pts, { color: st.color, weight: 3, opacity: 0.9 })
-          .bindPopup(`<b>${st.icon} ${st.label}</b><br>${esc(pa.name)} → ${esc(pb.name)}<br>出发: ${fmt(leg.departAt)}　到达: ${fmt(leg.arriveAt)}<br>花费: ${money(leg.cost)}`)
+          .bindPopup(`<b>${st.icon} ${st.label}</b><br>${esc(pa.name)} → ${esc(pb.name)}${tp ? '<br>' + tp : ''}<br>花费: ${money(leg.cost)}`)
           .addTo(_legGroup);
-        legArrow(A, B, ctrl, st.color);   // 到达端方向箭头
+        legArrow(A, B, ctrl, st.color);   // 线段中部方向箭头，指向 to 端
       });
     }
   }
@@ -290,9 +374,9 @@ function renderMap() {
     const coverUrl = s.coverPhotoId ? (_coverUrls.get(s.coverPhotoId) || null) : null;
     let html, iconSize;
     if (coverUrl) {
-      html = `<div class="fp-marker"><div class="fp-bubble"><img src="${coverUrl}" alt=""></div>`
-        + `<div class="fp-tail"></div><div class="fp-dot" style="background:${color}"></div></div>`;
-      iconSize = [56, 68];
+      html = `<div class="fp-marker"><div class="fp-cover" title="点击查看照片"><img src="${coverUrl}" alt=""></div>`
+        + `<div class="fp-dot" style="background:${color}"></div></div>`;
+      iconSize = [56, 60];
     } else {
       html = `<div class="fp-marker"><div class="fp-dot" style="background:${color}"></div></div>`;
       iconSize = [56, 16];
@@ -300,8 +384,13 @@ function renderMap() {
     const marker = L.marker([s.lat, s.lng], {
       icon: L.divIcon({ className: 'fp-marker-icon', html, iconSize, iconAnchor: [Math.round(iconSize[0] / 2), iconSize[1] - 1] }),
       keyboard: false,
-    }).bindPopup(() => stopPopupHtml(s)).addTo(layerGroup);
-    marker.on('dblclick', () => openCarousel(s.id));   // 双击封面气泡 → 轮播
+    });
+    if (coverUrl) {
+      marker.on('click', () => openCarousel(s.id));   // 有封面城市：点击封面/圆点 → 全屏轮播（封面第一张）
+    } else {
+      marker.bindPopup(() => stopPopupHtml(s));       // 无封面城市：点击圆点 → 信息卡片
+    }
+    marker.addTo(layerGroup);
     _stopMarkers.set(s.id, marker);
   });
 }
@@ -315,9 +404,23 @@ function stopPopupHtml(s) {
   const cur = s.markerColor || DEFAULT_MARKER_COLOR;
   const swatches = MARKER_COLORS.map(c =>
     `<button class="swatch${c === cur ? ' selected' : ''}" data-stopcolor="${c}" data-stop-id="${s.id}" style="background:${c}" title="${c}"></button>`).join('');
+  // 信息行：字段为空就不显示该行（停留天数按到达/离开日期计算，缺日期不显示）
+  const rows = [];
+  if (s.arriveDate && s.leaveDate) {
+    const days = Math.round((new Date(s.leaveDate) - new Date(s.arriveDate)) / 864e5) + 1;
+    if (!isNaN(days) && days > 0) rows.push(`📍 停留 ${days} 天`);
+  }
+  if (s.weather) rows.push('🌤 天气: ' + esc(s.weather));
+  if (s.mood) rows.push('😊 心情: ' + esc(s.mood));
+  if (s.cost != null && s.cost !== '') rows.push('💰 花费: ' + money(s.cost));
+  if (s.companions) rows.push('👥 同行: ' + esc(s.companions));
+  const trip = TRIPS.find(t => t.id === s.tripId);
+  if (trip && trip.title) rows.push('🧳 行程: ' + esc(trip.title));
+  if (s.note) rows.push('📝 ' + esc(s.note));
+  const infoHtml = rows.length ? '<br>' + rows.join('<br>') : '';
   return `<b>${esc(s.nameZh)}${s.nameEn ? ' / ' + esc(s.nameEn) : ''}</b><br>`
-    + `${fmt(s.arriveDate)}${s.leaveDate ? ' ~ ' + fmt(s.leaveDate) : ''}<br>`
-    + `心情: ${fmt(s.mood)}　花费: ${money(s.cost)}<br>${esc(s.note || '')}${diaryHtml}`
+    + `${fmt(s.arriveDate)}${s.leaveDate ? ' ~ ' + fmt(s.leaveDate) : ''}`
+    + `${infoHtml}${diaryHtml}`
     + `<br><button class="link-btn" data-photos="${s.id}">📷 照片（${photoCount(s.id)}）</button>`
     + `<div class="swatch-row" style="margin-top:6px;">${swatches}</div>`;
 }
@@ -492,6 +595,7 @@ async function drillToProvince(adcode, provName, bounds) {
     hideHoverBar();
     if (provinceLayer) { map.removeLayer(provinceLayer); provinceLayer = null; }
     if (_legGroup) map.removeLayer(_legGroup);   // 省内视图隐藏全部交通连线
+    if (_wishGroup) map.removeLayer(_wishGroup); // 省内视图隐藏心愿星标
     renderCityLayer();
     // 省级外轮廓加粗压顶：weight 3 / #1b5e3f / 不透明，与地市细线明显区分
     if (_outlineLayer) { map.removeLayer(_outlineLayer); _outlineLayer = null; }
@@ -522,6 +626,7 @@ function backToChina() {
   if (_outlineLayer) { map.removeLayer(_outlineLayer); _outlineLayer = null; }   // 清除省级外轮廓
   renderProvincesNational();
   renderMap();   // 重新加回 Leg 连线图层组（含省内期间新增/编辑的连线）
+  if (_wishGroup) { map.addLayer(_wishGroup); renderWishMarkers(); }   // 恢复心愿星标
   map.setView([35, 105], 4);
   document.getElementById('btn-back-china').hidden = true;
 }
@@ -566,17 +671,18 @@ function renderTimeline() {
   const trips = [...TRIPS].sort((a, b) => (b.dateStart || '').localeCompare(a.dateStart || ''));
   el.innerHTML = trips.map(trip => {
     const stops = STOPS.filter(s => s.tripId === trip.id)
-      .map(s => ({ type: 'stop', date: s.arriveDate, html:
+      .map(s => ({ type: 'stop', date: s.arriveDate || '9999', html:
         `<div class="tl-icon">📍</div><div class="tl-body"><b>${esc(s.nameZh)}</b>`
         + `<div class="sub">${fmt(s.arriveDate)}${s.leaveDate ? ' ~ ' + fmt(s.leaveDate) : ''}｜心情 ${fmt(s.mood)}｜${money(s.cost)}</div>`
         + (s.note ? `<div class="sub">${esc(s.note)}</div>` : '') + `</div>` }));
     const legs = LEGS.filter(l => l.tripId === trip.id)
       .map(l => {
-        const a = stopById(l.fromStopId), b = stopById(l.toStopId);
+        const pa = legEndpoint(l, 'from'), pb = legEndpoint(l, 'to');
         const st = legStyle(l.mode);
-        return { type: 'leg', date: l.departAt, html:
-          `<div class="tl-icon">${st.icon}</div><div class="tl-body"><b>${st.label}</b>：${a ? esc(a.nameZh) : '?'} → ${b ? esc(b.nameZh) : '?'}`
-          + `<div class="sub">${fmt(l.departAt)}${l.arriveAt ? ' 到达 ' + fmt(l.arriveAt) : ''}｜${money(l.cost)}</div>`
+        const meta = [legTimeLine(l), l.cost == null ? '' : money(l.cost)].filter(Boolean).join('｜');
+        return { type: 'leg', date: l.departAt || '9999', html:   // 时间为空的条目排在最后
+          `<div class="tl-icon">${st.icon}</div><div class="tl-body"><b>${st.label}</b>：${pa ? esc(pa.name) : '?'} → ${pb ? esc(pb.name) : '?'}`
+          + `<div class="sub">${meta}</div>`
           + (l.note ? `<div class="sub">${esc(l.note)}</div>` : '') + `</div>` };
       });
     const items = [...stops, ...legs].sort((x, y) => (x.date || '').localeCompare(y.date || ''));
@@ -646,9 +752,18 @@ function legFormEndpoint(f, end) {
 }
 function resetLegForm() {
   _editingLegId = null;
+  _legDirty = false;
   const f = document.getElementById('form-leg');
   f.reset();
   updateLegManualVisibility();
+  syncReturnBtn();
+}
+// "添加返程"按钮：仅编辑态显示，未改动灰显
+function syncReturnBtn() {
+  const btn = document.getElementById('btn-add-return');
+  if (!btn) return;
+  btn.hidden = !_editingLegId;
+  btn.disabled = !(_editingLegId && _legDirty);
 }
 
 function renderLists() {
@@ -692,7 +807,7 @@ function renderLists() {
       const st = legStyle(l.mode);
       return `<div class="data-block"><div class="data-row"><span class="txt"><b>${st.icon} ${st.label}</b>`
         + `<div class="sub">${esc(tripTitle(l.tripId))}</div>`
-        + `<div class="sub">${esc(pa ? pa.name : '?')} → ${esc(pb ? pb.name : '?')}｜${fmt(l.departAt)}${l.arriveAt ? ' 到达 ' + fmt(l.arriveAt) : ''}｜${money(l.cost)}</div>`
+        + `<div class="sub">${esc(pa ? pa.name : '?')} → ${esc(pb ? pb.name : '?')}｜${[legTimeLine(l), l.cost == null ? '' : money(l.cost)].filter(Boolean).join('｜')}</div>`
         + `</span><button class="small ghost" data-edit="leg" data-id="${l.id}">编辑</button> `
         + `<button class="small" data-del="leg" data-id="${l.id}">删除</button></div></div>`;
     }).join('');
@@ -742,7 +857,7 @@ function resetDiaryForm() {
 }
 
 /* ===== 已有数据编辑（Trip / 城市 / Leg） ===== */
-const SAVE_LABELS = { trip: '保存行程', stop: '保存城市', leg: '保存交通段' };
+const SAVE_LABELS = { trip: '保存行程', stop: '保存城市', leg: '保存交通段', wish: '保存心愿' };
 function setEditState(kind, name) {
   const banner = document.getElementById('edit-banner-' + kind);
   const nameEl = document.getElementById('edit-name-' + kind);
@@ -763,6 +878,10 @@ function exitEditMode(kind) {
     clearCityPicker();
   } else if (kind === 'leg') {
     resetLegForm();
+  } else if (kind === 'wish') {
+    _editingWishId = null;
+    document.getElementById('form-wish').reset();
+    clearWishCityPicker();
   }
   setEditState(kind, '');
 }
@@ -838,11 +957,450 @@ function startEditLeg(id) {
   f.note.value = l.note || '';
   const pa = legEndpoint(l, 'from'), pb = legEndpoint(l, 'to');
   setEditState('leg', (pa ? pa.name : '?') + ' → ' + (pb ? pb.name : '?'));
+  _legDirty = false;
+  syncReturnBtn();   // 编辑态显示返程按钮（未改动灰显）
   f.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+/* ===== 心愿清单 Wishlist ===== */
+// 中文模糊匹配：连续子串 或 关键字按序子序列
+function fuzzyHit(text, kw) {
+  if (!kw) return true;
+  const t = String(text).toLowerCase();
+  if (t.includes(kw)) return true;
+  let i = 0;
+  for (const ch of kw) { i = t.indexOf(ch, i); if (i < 0) return false; i++; }
+  return true;
+}
+function wishProgressPct(w) {
+  if (!w.budget || w.budget <= 0) return w.saved > 0 ? 100 : 0;
+  return Math.min(100, Math.round(w.saved / w.budget * 100));
+}
+function wishBarHtml(w) {
+  if (!w.budget || w.budget <= 0) return '';
+  return `<div class="wish-bar"><div class="wish-fill" style="width:${wishProgressPct(w)}%"></div></div>`;
+}
+// 未完成按 order 升序在前，完成沉底
+function wishSorted() {
+  return [...WISHES].sort((a, b) =>
+    (a.done === b.done) ? ((a.order || 0) - (b.order || 0)) : (a.done ? 1 : -1));
+}
+function renderWishSummary() {
+  const el = document.getElementById('wish-summary');
+  if (!el) return;
+  const want = WISHES.filter(w => !w.done).length;
+  const budget = WISHES.reduce((s, w) => s + (Number(w.budget) || 0), 0);
+  const saved = WISHES.reduce((s, w) => s + (Number(w.saved) || 0), 0);
+  const pct = budget > 0 ? Math.min(100, Math.round(saved / budget * 100)) : 0;
+  el.innerHTML = `想去 <b>${want}</b> 个 · 总预算 <b>¥${budget.toLocaleString()}</b> · 已攒 <b>¥${saved.toLocaleString()}</b>`
+    + `<div class="wish-bar wish-bar-lg"><div class="wish-fill" style="width:${pct}%"></div></div>`;
+}
+function renderWishList() {
+  const el = document.getElementById('list-wishes');
+  if (!el) return;
+  if (!WISHES.length) { el.innerHTML = '<p class="empty">还没有心愿，添加一个想去的地方吧。</p>'; return; }
+  el.innerHTML = wishSorted().map(w => {
+    const tags = [];
+    if (w.region || w.city) tags.push(esc([w.region, w.city].filter(Boolean).join(' / ')));
+    if (w.targetDate) tags.push('🗓 ' + esc(w.targetDate));
+    const pct = wishProgressPct(w);
+    return `<div class="data-block wish-row${w.done ? ' wish-done' : ''}">`
+      + `<input type="checkbox" class="wish-check" data-wish-check="${w.id}"${w.done ? ' checked' : ''} title="标记完成">`
+      + `<span class="txt wish-txt"><b>${esc(w.nameZh)}</b>`
+      + (tags.length ? `<div class="sub">${tags.join('｜')}</div>` : '')
+      + (w.note ? `<div class="sub">${esc(w.note)}</div>` : '')
+      + `</span>`
+      + `<span class="wish-money">¥${(Number(w.saved) || 0).toLocaleString()} / ¥${(Number(w.budget) || 0).toLocaleString()}${wishBarHtml(w)}</span>`
+      + `<span class="wish-ops">`
+      + `<button class="small ghost" data-wish-move="${w.id}" data-dir="-1" title="上移">↑</button>`
+      + `<button class="small ghost" data-wish-move="${w.id}" data-dir="1" title="下移">↓</button>`
+      + `<button class="small ghost" data-wish-edit="${w.id}">编辑</button>`
+      + `<button class="small" data-wish-del="${w.id}">删除</button></span></div>`;
+  }).join('');
+}
+// 心愿星标：空心星形（琥珀描边，完成变灰），独立图层组
+function wishStarIcon(w) {
+  const stroke = w.done ? '#9aa0a6' : '#C99A45';
+  return L.divIcon({
+    className: 'wish-star-icon',
+    html: `<svg width="26" height="26" viewBox="0 0 24 24"><path d="M12 2.5l2.9 6.2 6.8.6-5.1 4.5 1.5 6.7-6.1-3.6-6.1 3.6 1.5-6.7-5.1-4.5 6.8-.6z" fill="rgba(255,255,255,0)" stroke="${stroke}" stroke-width="2" stroke-linejoin="round"/></svg>`,
+    iconSize: [26, 26], iconAnchor: [13, 13],
+  });
+}
+function wishPopupHtml(w) {
+  const rows = [];
+  if (w.region || w.city) rows.push(esc([w.region, w.city].filter(Boolean).join(' / ')));
+  if (w.targetDate) rows.push('🗓 计划: ' + esc(w.targetDate));
+  if (w.budget) rows.push('💰 预算: ¥' + Number(w.budget).toLocaleString());
+  if (w.saved) rows.push('🏦 已攒: ¥' + Number(w.saved).toLocaleString());
+  if (w.note) rows.push('📝 ' + esc(w.note));
+  rows.push(w.done ? '✅ 已完成' : '⭐ 想去');
+  return `<b>${esc(w.nameZh)}</b><br>${rows.join('<br>')}${wishBarHtml(w)}`;
+}
+function renderWishMarkers() {
+  if (!_wishGroup) return;
+  _wishGroup.clearLayers();
+  WISHES.forEach(w => {
+    if (w.lat == null || w.lng == null || w.lat === '' || w.lng === '') return;
+    const lat = Number(w.lat), lng = Number(w.lng);
+    if (isNaN(lat) || isNaN(lng)) return;
+    L.marker([lat, lng], { icon: wishStarIcon(w) })
+      .bindPopup(() => wishPopupHtml(w))
+      .addTo(_wishGroup);
+  });
+}
+function renderWishes() {
+  renderWishSummary();
+  renderWishList();
+  renderWishMarkers();
+}
+// 上移/下移：交换相邻两条未完成心愿的 order
+async function moveWish(id, dir) {
+  const vis = wishSorted().filter(w => !w.done);
+  const idx = vis.findIndex(w => w.id === id);
+  const j = idx + dir;
+  if (idx < 0 || j < 0 || j >= vis.length) return;
+  const a = vis[idx], b = vis[j];
+  const t = (a.order || 0);
+  a.order = (b.order || 0);
+  b.order = (t === a.order) ? a.order + 1 : t;   // 防止交换后相等
+  await DB.putWish(a); await DB.putWish(b);
+  WISHES = await DB.getWishlist();
+  renderWishes();
+}
+// 心愿城市预设（可搜索，回填省/市/经纬度，允许不填坐标）
+function clearWishCityPicker() {
+  const inp = document.getElementById('wish-city-input');
+  const list = document.getElementById('wish-city-list');
+  if (inp) inp.value = '';
+  if (list) list.hidden = true;
+}
+function initWishCityPicker() {
+  const input = document.getElementById('wish-city-input');
+  const list = document.getElementById('wish-city-list');
+  if (!input || !list || !window.CITIES) return;
+  const byProv = new Map();
+  window.CITIES.forEach(c => {
+    if (!byProv.has(c.province)) byProv.set(c.province, []);
+    byProv.get(c.province).push(c);
+  });
+  function renderW(keyword) {
+    const kw = (keyword || '').trim().toLowerCase();
+    let html = '';
+    let count = 0;
+    byProv.forEach((arr, prov) => {
+      const hits = arr.filter(c => !kw || fuzzyHit(c.name, kw) || fuzzyHit(prov, kw));
+      if (!hits.length) return;
+      count += hits.length;
+      html += `<div class="cp-group">${esc(prov)}</div>` + hits.map(c =>
+        `<div class="cp-item" data-wname="${esc(c.name)}" data-wprov="${esc(c.province)}" data-wlat="${c.lat}" data-wlng="${c.lng}">`
+        + `<span>${esc(c.name)}</span><span class="cp-coords">${c.lat.toFixed(2)}, ${c.lng.toFixed(2)}</span></div>`).join('');
+    });
+    if (!count && kw) html += '<div class="cp-empty">没有匹配的城市，可手动填写经纬度或留空</div>';
+    list.innerHTML = html;
+    list.hidden = false;
+  }
+  input.addEventListener('focus', () => renderW(input.value));
+  input.addEventListener('input', () => renderW(input.value));
+  list.addEventListener('click', (e) => {
+    const item = e.target.closest('[data-wname]');
+    if (!item) return;
+    const f = document.getElementById('form-wish');
+    const name = item.dataset.wname;
+    f.city.value = name.replace(/市$/, '');
+    f.region.value = item.dataset.wprov;
+    f.lat.value = item.dataset.wlat;
+    f.lng.value = item.dataset.wlng;
+    if (!f.nameZh.value.trim()) f.nameZh.value = f.city.value;
+    input.value = name;
+    list.hidden = true;
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#wish-city-input') && !e.target.closest('#wish-city-list')) list.hidden = true;
+  });
+}
+function bindWish() {
+  initWishCityPicker();
+  document.getElementById('form-wish').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const nameZh = f.nameZh.value.trim();
+    if (!nameZh) { toast('请填写城市/地区名称'); return; }
+    const budget = f.budget.value === '' ? null : Number(f.budget.value);
+    const saved = f.saved.value === '' ? 0 : Number(f.saved.value);
+    if (budget != null && (isNaN(budget) || budget < 0)) { toast('预估预算必须是非负数字'); return; }
+    if (isNaN(saved) || saved < 0) { toast('已攒金额必须是非负数字'); return; }
+    const wasEditing = !!_editingWishId;
+    const old = wasEditing ? WISHES.find(w => w.id === _editingWishId) : null;
+    const num = (v) => (v === '' ? null : Number(v));
+    const rec = {
+      id: _editingWishId || uid(),
+      nameZh,
+      country: '中国', region: f.region.value.trim(), city: f.city.value.trim(),
+      lat: num(f.lat.value), lng: num(f.lng.value),
+      note: f.note.value.trim(), budget, saved,
+      targetDate: f.targetDate.value || '',
+      order: old ? old.order : (Math.max(0, ...WISHES.map(w => w.order || 0)) + 1),
+      done: old ? !!old.done : false,
+      createdAt: old ? old.createdAt : new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    await DB.putWish(rec);
+    if (wasEditing) exitEditMode('wish'); else { f.reset(); clearWishCityPicker(); }
+    await reload();
+    toast(wasEditing ? '心愿已更新' : '心愿已保存');
+  });
+  document.getElementById('btn-edit-cancel-wish').addEventListener('click', () => exitEditMode('wish'));
+  document.getElementById('list-wishes').addEventListener('click', async (e) => {
+    const moveBtn = e.target.closest('[data-wish-move]');
+    const editBtn = e.target.closest('[data-wish-edit]');
+    const delBtn = e.target.closest('[data-wish-del]');
+    if (moveBtn) { await moveWish(moveBtn.dataset.wishMove, Number(moveBtn.dataset.dir)); }
+    else if (editBtn) {
+      const w = WISHES.find(x => x.id === editBtn.dataset.wishEdit);
+      if (!w) return;
+      _editingWishId = w.id;
+      const f = document.getElementById('form-wish');
+      f.nameZh.value = w.nameZh || '';
+      f.region.value = w.region || '';
+      f.city.value = w.city || '';
+      f.lat.value = (w.lat == null ? '' : w.lat);
+      f.lng.value = (w.lng == null ? '' : w.lng);
+      f.note.value = w.note || '';
+      f.budget.value = (w.budget == null ? '' : w.budget);
+      f.saved.value = (w.saved == null ? 0 : w.saved);
+      f.targetDate.value = w.targetDate || '';
+      clearWishCityPicker();
+      setEditState('wish', w.nameZh);
+      f.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else if (delBtn) {
+      const id = delBtn.dataset.wishDel;
+      if (!confirm('删除这条心愿？此操作不可撤销。')) return;
+      await DB.delWish(id);
+      if (_editingWishId === id) exitEditMode('wish');
+      await reload();
+      toast('心愿已删除');
+    }
+  });
+  document.getElementById('list-wishes').addEventListener('change', async (e) => {
+    const cb = e.target.closest('[data-wish-check]');
+    if (!cb) return;
+    const w = WISHES.find(x => x.id === cb.dataset.wishCheck);
+    if (!w) return;
+    w.done = cb.checked;
+    w.updatedAt = new Date().toISOString();
+    await DB.putWish(w);
+    WISHES = await DB.getWishlist();
+    renderWishes();
+  });
+}
+
+/* ===== 轨迹播放 ===== */
+let _playGroup = null, _play = null;
+// 播放顺序：行程内城市按到达日期升序，无日期按录入顺序排最后
+function playSequence(tripId) {
+  return STOPS.filter(s => s.tripId === tripId)
+    .map((s, i) => ({ s, ord: s.arriveDate || '9999-' + String(i).padStart(6, '0') }))
+    .sort((a, b) => a.ord.localeCompare(b.ord))
+    .map(x => x.s);
+}
+function legBetween(prevId, curId) {
+  return LEGS.find(l => {
+    const f = (l.from && l.from.kind === 'stop') ? l.from.stopId : l.fromStopId;
+    const t = (l.to && l.to.kind === 'stop') ? l.to.stopId : l.toStopId;
+    return (f === prevId && t === curId) || (f === curId && t === prevId);
+  });
+}
+// 播放等待：speed 加速、暂停冻结、退出立即返回（rAF 驱动，不阻塞）
+function playWait(ms) {
+  return new Promise(resolve => {
+    const st = _play;
+    let acc = 0, last = performance.now();
+    function tick(now) {
+      if (!st || !st.running) return resolve();
+      if (!st.paused) acc += (now - last) * st.speed;
+      last = now;
+      if (acc >= ms) return resolve();
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  });
+}
+// 线段 0%→100% 逐段绘制动画
+// 播放前预读：把行程城市、每段 Leg 的完整路径点一次性构建进内存，播放中零数据查询
+function buildSegments(seq) {
+  const segs = [];
+  for (let i = 1; i < seq.length; i++) {
+    const leg = legBetween(seq[i - 1].id, seq[i].id);
+    const st = legStyle(leg ? leg.mode : 'train');
+    const A = [seq[i - 1].lat, seq[i - 1].lng], B = [seq[i].lat, seq[i].lng];
+    let pts;
+    if (leg && leg.mode === 'plane') {
+      pts = planeCurve(A, B, curveCtrl(A, B));                 // 弧线按贝塞尔参数取点
+    } else {
+      pts = [];
+      const N = 24;                                            // 直线线性插值
+      for (let k = 0; k <= N; k++) pts.push([A[0] + (B[0] - A[0]) * k / N, A[1] + (B[1] - A[1]) * k / N]);
+    }
+    segs.push({ hasLeg: !!leg, pts, color: st.color, from: A, to: B });
+  }
+  return segs;
+}
+// 缩放按城市间距自适应：近距离 12，远距离 9
+function playZoomFor(prev, cur) {
+  if (!prev) return 11;
+  const d = Math.hypot(cur.lat - prev.lat, cur.lng - prev.lng);
+  if (d < 1) return 12;
+  if (d < 3) return 11;
+  if (d < 8) return 10;
+  return 9;
+}
+// 路线生长动画：Polyline 逐点加入 + 光点沿路径同步前进（rAF 驱动，暂停冻结）
+function animateSegment(seg) {
+  return new Promise(resolve => {
+    const st = _play;
+    const pts = seg.pts;
+    const line = L.polyline([pts[0]], { color: seg.color, weight: 3, opacity: 0.9 }).addTo(_playGroup);
+    const runner = L.marker(pts[0], {
+      icon: L.divIcon({
+        className: 'play-runner-icon', iconSize: [14, 14], iconAnchor: [7, 7],
+        html: `<div class="play-runner" style="background:${seg.color}"></div>`,
+      }),
+      interactive: false,
+    }).addTo(_playGroup);
+    let acc = 0, last = performance.now();
+    function tick(now) {
+      if (!st || !st.running) return resolve();
+      if (!st.paused) acc += (now - last) * st.speed;
+      last = now;
+      const t = Math.min(1, acc / 1000);
+      const fi = t * (pts.length - 1);
+      const i0 = Math.floor(fi), frac = fi - i0;
+      const head = i0 >= pts.length - 1 ? pts[pts.length - 1]
+        : [pts[i0][0] + (pts[i0 + 1][0] - pts[i0][0]) * frac, pts[i0][1] + (pts[i0 + 1][1] - pts[i0][1]) * frac];
+      line.setLatLngs(pts.slice(0, i0 + 1).concat([head]));    // 线条逐点生长
+      runner.setLatLng(head);                                   // 光点沿路径前进
+      if (t < 1) requestAnimationFrame(tick);
+      else {
+        const el = runner.getElement();                         // 到达终点：光点淡出
+        if (el) { const d = el.querySelector('.play-runner'); if (d) d.classList.add('play-fade'); }
+        setTimeout(() => { if (_playGroup) _playGroup.removeLayer(runner); }, 700);
+        resolve();
+      }
+    }
+    requestAnimationFrame(tick);
+  });
+}
+// 城市到达标记：0.3s 缩放淡入 + 名称/到达日期标签；已播放城市保留不清除
+function showPlayMarker(city) {
+  const label = city.nameZh + (city.arriveDate ? ' · ' + city.arriveDate : '');
+  L.marker([city.lat, city.lng], {
+    icon: L.divIcon({
+      className: 'play-marker-icon', iconSize: [20, 20], iconAnchor: [10, 10],
+      html: `<div class="play-dot"></div><div class="play-label">${esc(label)}</div>`,
+    }),
+    interactive: false,
+  }).addTo(_playGroup);
+}
+function setMapLock(lock) {
+  const m = lock ? 'disable' : 'enable';
+  ['dragging', 'scrollWheelZoom', 'doubleClickZoom', 'boxZoom', 'keyboard', 'touchZoom'].forEach(k => {
+    if (map[k] && map[k][m]) map[k][m]();
+  });
+}
+function updatePlayProgress(idx, total) {
+  const el = document.getElementById('play-progress');
+  if (el) el.textContent = `第 ${idx} / 共 ${total} 城`;
+}
+function setPlayBar(show) {
+  document.getElementById('play-bar').hidden = !show;
+}
+function fillPlayDrawer() {
+  const sel = document.getElementById('play-trip');
+  const empty = document.getElementById('play-empty');
+  const btn = document.getElementById('btn-start-play');
+  sel.innerHTML = TRIPS.map(t => `<option value="${t.id}">${esc(t.title)}</option>`).join('');
+  empty.hidden = TRIPS.length > 0;
+  btn.disabled = TRIPS.length === 0;
+  updatePlayStats();
+}
+function updatePlayStats() {
+  const tripId = document.getElementById('play-trip').value;
+  const n = STOPS.filter(s => s.tripId === tripId).length;
+  const m = LEGS.filter(l => l.tripId === tripId).length;
+  document.getElementById('play-stats').textContent = `该行程：${n} 个城市 · ${m} 段交通`;
+}
+async function startPlay(tripId) {
+  if (_play && _play.running) exitPlay();
+  const seq = playSequence(tripId);
+  if (!seq.length) { toast('该行程暂无城市，无法播放'); return; }
+  if (_drillAdcode) backToChina();
+  closeAllDrawers();
+  setMapLock(true);
+  if (_legGroup) map.removeLayer(_legGroup);   // 播放期间隐藏业务连线，用动画线代替
+  if (_wishGroup) map.removeLayer(_wishGroup); // 播放视图专注轨迹
+  _playGroup = L.layerGroup().addTo(map);
+  const speed = parseFloat(document.getElementById('play-speed').value) || 1;
+  _play = { running: true, paused: false, speed, abort: false, tripId };
+  document.getElementById('play-pause').textContent = '⏸ 暂停';
+  setPlayBar(true);
+  // 一次性预读全部数据（城市/路径点/颜色），播放循环内零查询
+  const segs = buildSegments(seq);
+  const n = seq.length;
+  for (let i = 0; i < n; i++) {
+    if (!_play.running) return;
+    const city = seq[i];
+    updatePlayProgress(i + 1, n);
+    showPlayMarker(city);                                      // 城市淡入（已到城市保留）
+    map.flyTo([city.lat, city.lng], playZoomFor(i ? seq[i - 1] : null, city),
+      { duration: 1.2, easeLinearity: 0.25 });                 // 平滑飞行
+    await playWait(1300);
+    if (!_play.running) return;
+    if (i > 0 && segs[i - 1].hasLeg) {
+      await animateSegment(segs[i - 1]);                       // 路线生长 + 光点前进
+      if (!_play.running) return;
+    }
+    await playWait(800);                                       // 到城停留 0.8s
+    if (!_play.running) return;
+  }
+  await playWait(2000);                                        // 最后停留 2 秒
+  if (!_play.running) return;
+  map.flyToBounds(L.latLngBounds(seq.map(c => [c.lat, c.lng])), { duration: 1.2, padding: [40, 40] });
+  await playWait(1400);                                        // 拉回全国视图，显示完整轨迹
+  finishPlay();
+}
+function finishPlay() {
+  if (_playGroup) { map.removeLayer(_playGroup); _playGroup = null; }
+  if (_legGroup && !map.hasLayer(_legGroup)) map.addLayer(_legGroup);   // 恢复业务连线 = 完整轨迹
+  if (_wishGroup && !map.hasLayer(_wishGroup)) map.addLayer(_wishGroup);
+  setMapLock(false);
+  setPlayBar(false);
+  if (_play) _play.running = false;
+}
+function exitPlay() {
+  if (_play) { _play.abort = true; _play.running = false; }
+  finishPlay();
+}
+function bindPlay() {
+  document.getElementById('play-trip').addEventListener('change', updatePlayStats);
+  document.getElementById('btn-start-play').addEventListener('click', () => startPlay(document.getElementById('play-trip').value));
+  document.getElementById('play-pause').addEventListener('click', () => {
+    if (!_play || !_play.running) return;
+    _play.paused = !_play.paused;
+    document.getElementById('play-pause').textContent = _play.paused ? '▶ 继续' : '⏸ 暂停';
+  });
+  document.getElementById('play-replay').addEventListener('click', () => {
+    const tripId = document.getElementById('play-trip').value || (_play && _play.tripId);
+    if (tripId) startPlay(tripId);
+  });
+  document.getElementById('play-speed').addEventListener('change', (e) => {
+    if (_play) _play.speed = parseFloat(e.target.value) || 1;
+  });
+  document.getElementById('play-exit').addEventListener('click', exitPlay);
+}
+
 /* ===== 工具栏 & 抽屉 ===== */
-const DRAWER_NAMES = ['entry', 'timeline', 'diary', 'photos', 'settings'];
+const DRAWER_NAMES = ['entry', 'timeline', 'diary', 'photos', 'settings', 'wishlist', 'play'];
 // 全局唯一打开状态：任意时刻至多一个抽屉打开，_openDrawer 记录其名字（null = 全部关闭）
 let _openDrawer = null;
 // 统一关闭函数：只收起指定抽屉（移除 .open，无残留容器），照片抽屉连带关灯箱并清空容器
@@ -876,6 +1434,7 @@ function openDrawer(name) {
   const tb = document.querySelector('.tool-btn[data-drawer="' + name + '"]');
   if (tb) tb.classList.add('active');
   _openDrawer = name;
+  if (name === 'play') fillPlayDrawer();
 }
 function bindDrawers() {
   document.querySelectorAll('.tool-btn[data-drawer]').forEach(btn => {
@@ -914,7 +1473,10 @@ function bindDrawers() {
     else if (closeBtn.id === 'lb-close') closeLightbox();
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { closeAllDrawers(); closeLightbox(); closeCarousel(); }
+    if (e.key === 'Escape') {
+      if (_play && _play.running) exitPlay();   // 播放中 Esc 退出播放
+      closeAllDrawers(); closeLightbox(); closeCarousel();
+    }
   });
   document.getElementById('btn-highlight').addEventListener('click', (e) => {
     _highlightMode = !_highlightMode;
@@ -978,12 +1540,14 @@ function initCityPicker() {
     byProv.get(c.province).push(c);
   });
 
+  // 中文模糊匹配改为全局 fuzzyHit（心愿城市预设共用）
+
   function render(keyword) {
     const kw = (keyword || '').trim().toLowerCase();
     let html = '<div class="cp-item cp-manual" data-manual="1">✍️ 手动填写（不自动回填，直接在下方输入）</div>';
     let count = 0;
     byProv.forEach((arr, prov) => {
-      const hits = arr.filter(c => !kw || c.name.toLowerCase().includes(kw) || prov.toLowerCase().includes(kw));
+      const hits = arr.filter(c => !kw || fuzzyHit(c.name, kw) || fuzzyHit(prov, kw));
       if (!hits.length) return;
       count += hits.length;
       html += `<div class="cp-group">${esc(prov)}</div>` + hits.map(c =>
@@ -1085,6 +1649,24 @@ function bindForms() {
   const legForm = document.getElementById('form-leg');
   legForm.fromStopId.addEventListener('change', updateLegManualVisibility);
   legForm.toStopId.addEventListener('change', updateLegManualVisibility);
+  // 编辑态任一字段改动 → "添加返程"变为可点
+  legForm.addEventListener('input', () => { if (_editingLegId) { _legDirty = true; syncReturnBtn(); } });
+  legForm.addEventListener('change', () => { if (_editingLegId) { _legDirty = true; syncReturnBtn(); } });
+  // 添加返程：反向生成一条新 Leg（原段不动），路线名称/时间/花费/备注留空
+  document.getElementById('btn-add-return').addEventListener('click', async () => {
+    if (!_editingLegId || !_legDirty) return;
+    const f = document.getElementById('form-leg');
+    const fe = legFormEndpoint(f, 'to');    // 反向：新出发 = 当前到达
+    const te = legFormEndpoint(f, 'from');  // 新到达 = 当前出发
+    if (!fe || !te) { toast('请先完善起止城市'); return; }
+    if (fe.name.trim() === te.name.trim()) { toast('出发与到达城市不能相同'); return; }
+    await DB.putLeg({
+      id: uid(), tripId: f.tripId.value, from: fe, to: te, mode: f.mode.value,
+      departAt: '', arriveAt: '', cost: null, note: '',
+    });
+    await reload();
+    toast('已添加返程段');
+  });
   // 手动输入城市名时，若与已有城市/常驻城市同名则自动回填坐标（可再手动覆盖）
   [['from', 'Name', 'Lat', 'Lng'], ['to', 'Name', 'Lat', 'Lng']].forEach(([end, n, la, ln]) => {
     legForm[end + n].addEventListener('input', () => {
@@ -1150,7 +1732,37 @@ function bindForms() {
     if (wasEditing) exitEditMode('stop');
     else { f.reset(); setStopColorSelection(DEFAULT_MARKER_COLOR); clearCityPicker(); }
     await reload(); toast(wasEditing ? '城市已更新' : '城市已保存');
+    if (!wasEditing) await autoChainLeg(stop);   // 行程内按到达日期自动串联相邻城市
   });
+
+// 自动串联：新增城市后，对行程内按到达日期排序的相邻城市对补缺生成 Leg（首尾不连、已有连线不重复）
+async function autoChainLeg(stop) {
+  const list = STOPS.filter(s => s.tripId === stop.tripId)
+    .sort((a, b) => (a.arriveDate || '9999').localeCompare(b.arriveDate || '9999'));
+  let added = 0, first = null, second = null;
+  for (let i = 1; i < list.length; i++) {
+    const prev = list[i - 1], cur = list[i];
+    const linked = LEGS.some(l => {
+      const f = (l.from && l.from.kind === 'stop') ? l.from.stopId : l.fromStopId;
+      const t = (l.to && l.to.kind === 'stop') ? l.to.stopId : l.toStopId;
+      return (f === prev.id && t === cur.id) || (f === cur.id && t === prev.id);
+    });
+    if (linked) continue;
+    await DB.putLeg({
+      id: uid(), tripId: stop.tripId,
+      from: { kind: 'stop', stopId: prev.id, name: prev.nameZh },
+      to: { kind: 'stop', stopId: cur.id, name: cur.nameZh },
+      mode: 'train', departAt: '', arriveAt: '', cost: null,
+      note: '自动串联（请选择交通方式）',
+    });
+    if (!first) { first = prev.nameZh; second = cur.nameZh; }
+    added++;
+  }
+  if (added) {
+    await reload();
+    toast(`已自动串联 ${first} → ${second}` + (added > 1 ? ` 等 ${added} 段，请在列表中编辑交通方式` : '，请在列表中编辑交通方式'));
+  }
+}
 
   document.getElementById('form-leg').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -1232,6 +1844,26 @@ function bindForms() {
     toast(wasEditing ? '日记已更新' : '日记已保存');
   });
   document.getElementById('btn-diary-cancel').addEventListener('click', resetDiaryForm);
+  // 四个表单的"清空"按钮：重置为空白新增状态并退出编辑，不清已保存数据
+  document.querySelectorAll('[data-form-clear]').forEach(b => {
+    b.addEventListener('click', () => {
+      const k = b.dataset.formClear;
+      if (k === 'diary') resetDiaryForm();
+      else exitEditMode(k);
+      toast('表单已清空');
+    });
+  });
+  // Leg 出发/到达互换：交换下拉选择与手动输入字段（含坐标），保存时仍校验不能相同
+  document.getElementById('btn-swap-leg').addEventListener('click', () => {
+    const f = document.getElementById('form-leg');
+    const sv = f.fromStopId.value; f.fromStopId.value = f.toStopId.value; f.toStopId.value = sv;
+    ['Name', 'Lat', 'Lng'].forEach(sfx => {
+      const a = f['from' + sfx].value;
+      f['from' + sfx].value = f['to' + sfx].value;
+      f['to' + sfx].value = a;
+    });
+    updateLegManualVisibility();
+  });
   // Trip/城市/Leg 的"取消编辑"
   [['trip', 'btn-edit-cancel-trip'], ['stop', 'btn-edit-cancel-stop'], ['leg', 'btn-edit-cancel-leg']]
     .forEach(([kind, bid]) => {
@@ -1301,6 +1933,8 @@ async function renderPhotoGrid() {
   _stopPhotos = await DB.getPhotosByStop(_photoStopId);
   _stopPhotos.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
   emptyEl.hidden = _stopPhotos.length > 0;
+  const cnt = document.getElementById('photo-count');
+  if (cnt) cnt.textContent = `${_stopPhotos.length}/${PHOTO_LIMIT}`;
   grid.innerHTML = _stopPhotos.map(p => {
     const url = URL.createObjectURL(p.blob); _thumbUrls.push(url);
     return `<figure class="photo-cell"><img class="photo-thumb" src="${url}" data-photo-view="${p.id}" alt="${esc(p.caption || '照片')}"></figure>`;
@@ -1374,10 +2008,13 @@ async function openCarousel(stopId) {
   const photos = await DB.getPhotosByStop(stopId);
   if (!photos.length) { toast('该城市还没有照片'); return; }
   photos.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+  if (_pcUrls.length) _pcUrls.forEach(u => URL.revokeObjectURL(u));
   _pcStopId = stopId; _pcPhotos = photos;
-  _pcIdx = Math.max(0, photos.findIndex(p => p.id === stop.coverPhotoId));
+  _pcIdx = Math.max(0, photos.findIndex(p => p.id === stop.coverPhotoId));   // 封面照片作为第一张
   _pcUrls = photos.map(p => URL.createObjectURL(p.blob));
   renderCarousel(0);
+  document.getElementById('pc-title').textContent =
+    stop.nameZh + (photos[_pcIdx].shootDate ? ' · ' + photos[_pcIdx].shootDate : '');
   document.getElementById('photo-carousel').classList.add('open');
   if (map) map.closePopup();
 }
@@ -1413,8 +2050,13 @@ function bindPhotos() {
     const files = [...e.target.files];
     e.target.value = '';
     if (!files.length || !_photoStopId) return;
+    // 单城市照片上限 30 张：已达上限不追加，超出部分截断并提示
+    const used = photoCount(_photoStopId);
+    const remain = PHOTO_LIMIT - used;
+    if (remain <= 0) { toast('该城市照片已达上限'); return; }
+    const willUpload = files.slice(0, remain);
     let ok = 0, fail = 0;
-    for (const f of files) {
+    for (const f of willUpload) {
       if (!f.type || !f.type.startsWith('image/')) { fail++; continue; }
       try {
         const blob = await compressImage(f);
@@ -1433,7 +2075,8 @@ function bindPhotos() {
     await refreshCoverUrls();
     await renderPhotoGrid();
     renderMap();  // 避免弹窗计数过期，并同步封面气泡
-    toast(`已添加 ${ok} 张照片` + (fail ? `，${fail} 张失败` : ''));
+    const overCut = files.length > willUpload.length ? `，超出上限的 ${files.length - willUpload.length} 张未接收` : '';
+    toast(`已添加 ${ok} 张照片` + (fail ? `，${fail} 张失败` : '') + overCut);
   });
 
   // 列表里的"管理照片"入口（弹窗内入口由 popupopen 单独绑定）
@@ -1512,6 +2155,16 @@ function bindPhotos() {
   });
   document.getElementById('pc-prev').addEventListener('click', () => pcGo(-1));
   document.getElementById('pc-next').addEventListener('click', () => pcGo(1));
+  // 手机触摸左右滑动翻页
+  let _touchX = null;
+  const stage = document.querySelector('.pc-stage');
+  stage.addEventListener('touchstart', (e) => { _touchX = e.touches[0].clientX; }, { passive: true });
+  stage.addEventListener('touchend', (e) => {
+    if (_touchX == null) return;
+    const dx = e.changedTouches[0].clientX - _touchX;
+    if (Math.abs(dx) > 40) pcGo(dx > 0 ? -1 : 1);
+    _touchX = null;
+  }, { passive: true });
   document.getElementById('pc-thumbs').addEventListener('click', (e) => {
     const t = e.target.closest('[data-pc-idx]');
     if (!t) return;
@@ -1521,7 +2174,22 @@ function bindPhotos() {
 }
 
 /* ===== 设置：常驻城市 / 导出 / 导入 / 清空 ===== */
+// 数据统计条 + 备份提醒（距上次导出超过 30 天或从未导出时显示）
+async function renderStats() {
+  const el = document.getElementById('stats-bar');
+  if (el) el.textContent = `📊 行程 ${TRIPS.length} ｜ 城市 ${STOPS.length} ｜ 交通段 ${LEGS.length} ｜ 日记 ${DIARIES.length} ｜ 照片 ${_photoIndex.length}`;
+  const tip = document.getElementById('backup-tip');
+  if (!tip) return;
+  let last = null;
+  try { const rec = await DB.getConfig('lastExportAt'); last = rec ? rec.value : null; } catch (e) { last = null; }
+  const over = !last || (Date.now() - new Date(last).getTime() > 30 * 864e5);
+  tip.hidden = !over;
+  tip.textContent = last
+    ? `⚠️ 距上次导出已超过 30 天，建议导出 JSON 备份，防止清缓存丢失`
+    : '⚠️ 建议导出 JSON 备份，防止清缓存丢失';
+}
 function bindSettings() {
+  renderStats();
   // 常驻城市：改名/改坐标后保存，Leg 下拉与连线随 reload 同步更新
   const hf = document.getElementById('form-home-city');
   if (hf) {
@@ -1550,6 +2218,8 @@ function bindSettings() {
     a.download = 'footprint-backup-' + new Date().toISOString().slice(0, 10) + '.json';
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
+    await DB.putConfig({ key: 'lastExportAt', value: new Date().toISOString() });
+    renderStats();
     toast('已导出 JSON');
   });
 
@@ -1602,16 +2272,28 @@ async function seedIfEmpty() {
 /* ===== 启动 ===== */
 (async function init() {
   initTheme();
-  bindDrawers(); bindForms(); bindSettings(); bindKeyboard(); bindPhotos();
-  try {
-    await loadAll();
-    await seedIfEmpty();
-    await loadAll();
-    await loadPhotoIndex();
-    await refreshCoverUrls();
-    refreshSelects(); renderLegend(); initMap(); renderTimeline(); renderLists(); renderDiaries();
-  } catch (err) {
-    console.error(err);
-    toast('初始化出错：' + err.message);
+  bindDrawers(); bindForms(); bindSettings(); bindKeyboard(); bindPhotos(); bindWish(); bindPlay();
+  // 登录后才启动应用：数据加载 + 首屏渲染（supabase.js 的 SIGNED_IN 事件也会调用，幂等）
+  window.startApp = async function () {
+    if (window._appStarted) return;
+    window._appStarted = true;
+    try {
+      await loadAll();
+      await seedIfEmpty();
+      await loadAll();
+      await loadPhotoIndex();
+      await refreshCoverUrls();
+      refreshSelects(); renderLegend(); initMap(); renderTimeline(); renderLists(); renderDiaries(); renderWishes(); renderStats();
+    } catch (err) {
+      console.error(err);
+      toast('初始化出错：' + err.message);
+    }
+  };
+  await window._authReady;          // supabase.js：会话恢复 + 魔法链接回调处理完成
+  if (window._sbUser) {
+    if (typeof showAppUI === 'function') showAppUI();
+    await window.startApp();
+  } else {
+    if (typeof showLogin === 'function') showLogin();
   }
 })();

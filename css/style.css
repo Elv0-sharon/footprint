@@ -265,6 +265,40 @@ button.small.ghost:hover { background: var(--btn-hover); }
 
 /* 设置 */
 .settings-card .settings-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+
+/* 心愿清单 */
+.wish-ico { color: #C99A45; }
+.wish-summary {
+  font-size: 13px; padding: 10px 12px; border-radius: 10px; margin-bottom: 10px;
+  background: var(--card); border: 1px solid var(--border); box-shadow: var(--shadow);
+}
+.wish-summary b { color: var(--text); }
+.wish-row { display: flex; align-items: center; gap: 8px; }
+.wish-row .wish-check { flex: 0 0 auto; width: 16px; height: 16px; cursor: pointer; }
+.wish-row .wish-txt { flex: 1; min-width: 0; }
+.wish-money { flex: 0 0 auto; font-size: 12px; color: var(--muted); min-width: 96px; text-align: right; }
+.wish-ops { flex: 0 0 auto; display: flex; gap: 4px; flex-wrap: wrap; }
+.wish-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; margin-top: 4px; }
+.wish-bar .wish-fill { height: 100%; background: #C99A45; border-radius: 3px; transition: width .3s; }
+.wish-bar-lg { margin-top: 6px; height: 8px; }
+.wish-done .wish-txt b { color: var(--muted); text-decoration: line-through; }
+.wish-done { opacity: .55; }
+@media (max-width: 480px) {
+  .wish-row { flex-wrap: wrap; }
+  .wish-row .wish-money { min-width: 0; width: 100%; text-align: left; }
+  .wish-row .wish-ops { margin-left: 24px; }
+}
+.stats-bar {
+  font-size: 13px; padding: 8px 10px; border-radius: 8px; margin-bottom: 8px;
+  background: var(--thumb-bg); border: 1px solid var(--border); color: var(--text);
+}
+.backup-tip {
+  font-size: 13px; padding: 8px 10px; border-radius: 8px; margin-bottom: 8px;
+  background: #fff7e0; color: #8a6100; border: 1px solid #f0d48a;
+}
+[data-theme="dark"] .backup-tip {
+  background: #3a3122; color: #ffd98a; border-color: #6b5a2c;
+}
 .settings-card .hint { margin-top: 10px; font-size: 12px; }
 .hint { color: var(--muted); font-size: 13px; }
 
@@ -337,27 +371,92 @@ button.small.ghost:hover { background: var(--btn-hover); }
 }
 .leaflet-control-attribution a { color: var(--muted) !important; }
 
-/* 站点圆点 divIcon + 封面气泡 */
+/* 站点圆点 divIcon + 封面小图（叠在圆点上方，zoom>=9 显示） */
 .fp-marker-icon { background: transparent; border: none; }
 .fp-marker { display: flex; flex-direction: column; align-items: center; }
-.fp-bubble {
-  width: 56px; height: 46px; border-radius: 10px; overflow: hidden;
+.fp-cover {
+  width: 40px; height: 40px; border-radius: 10px; overflow: hidden;
   border: 2px solid var(--card); box-shadow: var(--shadow); background: var(--thumb-bg);
-  visibility: hidden; flex: 0 0 auto;
+  visibility: hidden; flex: 0 0 auto; cursor: pointer;
 }
-#map.bubbles-on .fp-bubble { visibility: visible; }
-.fp-bubble img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.fp-tail {
-  width: 0; height: 0; margin-top: -1px; flex: 0 0 auto;
-  border-left: 6px solid transparent; border-right: 6px solid transparent;
-  border-top: 7px solid var(--card);
-  visibility: hidden;
-}
-#map.bubbles-on .fp-tail { visibility: visible; }
+#map.bubbles-on .fp-cover { visibility: visible; }
+.fp-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .fp-dot {
   width: 14px; height: 14px; border-radius: 50%;
   border: 2px solid #fff; box-shadow: var(--shadow);
-  flex: 0 0 auto; margin-top: 2px;
+  flex: 0 0 auto; margin-top: 2px; cursor: pointer;
+}
+
+/* 轮播顶部标题（城市名 + 日期） */
+.pc-title {
+  padding: 10px 14px 0; font-size: 14px; font-weight: 600; color: var(--text);
+  text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 登录页（未登录全屏覆盖主界面） */
+.auth-screen {
+  position: fixed; inset: 0; z-index: 3000;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg); padding: 16px;
+}
+.auth-screen[hidden] { display: none; }
+.auth-card {
+  width: min(360px, calc(100vw - 32px));
+  display: flex; flex-direction: column; gap: 12px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+  padding: 28px 24px; box-shadow: var(--shadow);
+}
+.auth-card h1 { margin: 0; font-size: 20px; color: var(--text); text-align: center; }
+.auth-sub { margin: 0; font-size: 13px; color: var(--muted); text-align: center; }
+.auth-card input {
+  padding: 10px 12px; border-radius: 10px; border: 1px solid var(--input-border);
+  background: var(--input-bg); color: var(--text); font-size: 14px;
+}
+.auth-card .primary { padding: 10px 12px; border-radius: 10px; border: none; background: var(--accent); color: var(--on-accent); font-size: 14px; cursor: pointer; }
+.auth-card .hint { margin: 0; min-height: 18px; text-align: center; }
+body.auth-lock > *:not(#auth-screen) { display: none !important; }
+
+/* 轨迹播放：悬浮控制条 + 城市高亮标记 */
+.play-bar {
+  position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+  z-index: 1600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center;
+  padding: 8px 12px; border-radius: 14px; max-width: calc(100vw - 20px);
+  background: var(--card); border: 1px solid var(--border); box-shadow: var(--shadow);
+}
+.play-bar[hidden] { display: none; }
+.play-btn {
+  min-height: 44px; min-width: 44px; padding: 8px 12px; border-radius: 10px;
+  background: var(--btn-bg); border: 1px solid var(--btn-border); color: var(--text);
+  font-size: 13px; cursor: pointer;
+}
+.play-btn:hover { background: var(--btn-hover); }
+.play-danger { color: var(--danger); border-color: var(--danger); }
+.play-progress { font-size: 13px; color: var(--text); min-width: 80px; text-align: center; }
+.play-marker-icon { background: transparent; border: none; }
+.play-dot {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--accent); border: 3px solid #fff;
+  box-shadow: 0 0 0 6px rgba(46, 125, 99, .25);
+  animation: playPop .3s ease;   /* 城市到达 0.3s 缩放淡入 */
+}
+@keyframes playPop { from { transform: scale(.3); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+/* 光点：白描边 + 交通方式色填充，沿路径前进，到达后淡出 */
+.play-runner-icon { background: transparent; border: none; }
+.play-runner {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 3px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.4);
+  transition: opacity .6s ease;
+}
+.play-runner.play-fade { opacity: 0; }
+.play-label {
+  position: absolute; bottom: 26px; left: 50%; transform: translateX(-50%);
+  white-space: nowrap; font-size: 12px; font-weight: 600;
+  background: var(--card); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 3px 8px; box-shadow: var(--shadow);
+}
+@media (max-width: 480px) {
+  .play-bar { bottom: 8px; padding: 6px 8px; gap: 6px; }
+  .play-btn { padding: 6px 8px; font-size: 12px; }
 }
 
 /* 圆点颜色色板 */

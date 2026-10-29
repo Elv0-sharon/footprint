@@ -4,12 +4,23 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>旅行足迹 Footprint</title>
-  <link rel="icon" href="data:,">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%232E7D63' d='M12 2a7 7 0 0 0-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
+  <!-- 登录页（未登录时全屏覆盖主界面） -->
+  <div id="auth-screen" class="auth-screen" hidden>
+    <div class="auth-card">
+      <h1>🧭 旅行足迹</h1>
+      <p class="auth-sub">邮箱魔法链接登录 · 数据云端同步</p>
+      <input type="email" id="auth-email" placeholder="your@email.com" autocomplete="email">
+      <button id="btn-auth-send" class="primary">发送登录链接</button>
+      <p id="auth-msg" class="hint"></p>
+    </div>
+  </div>
+
   <header class="topbar">
     <div class="brand">🧭 旅行足迹</div>
   </header>
@@ -32,6 +43,12 @@
     </button>
     <button class="tool-btn" data-drawer="diary" title="心情日记">
       <span class="ico">📔</span><span class="txt">日记</span>
+    </button>
+    <button class="tool-btn" data-drawer="play" title="轨迹播放">
+      <span class="ico">▶️</span><span class="txt">轨迹</span>
+    </button>
+    <button class="tool-btn" data-drawer="wishlist" title="心愿清单">
+      <span class="ico wish-ico">✨</span><span class="txt">心愿</span>
     </button>
     <button class="tool-btn" id="btn-highlight" title="点亮模式（开关）">
       <span class="ico">💡</span><span class="txt">点亮</span>
@@ -57,6 +74,7 @@
         <label>结束日期<input type="date" name="dateEnd"></label>
         <label>备注<textarea name="note" rows="2" placeholder="可选"></textarea></label>
         <button type="submit" class="primary" id="btn-save-trip">保存行程</button>
+        <button type="button" class="ghost" data-form-clear="trip">清空</button>
       </form>
 
       <h3 class="card-title">新增城市</h3>
@@ -99,6 +117,7 @@
         <label>同行者<input name="companions" placeholder="可选，逗号分隔"></label>
         <label>备注<textarea name="note" rows="2" placeholder="可选"></textarea></label>
         <button type="submit" class="primary" id="btn-save-stop">保存城市</button>
+        <button type="button" class="ghost" data-form-clear="stop">清空</button>
       </form>
 
       <h3 class="card-title">新增交通段 Leg</h3>
@@ -115,6 +134,7 @@
             <select name="toStopId" required></select>
           </label>
         </div>
+        <button type="button" id="btn-swap-leg" class="ghost">⇄ 互换出发/到达</button>
         <div class="row leg-manual" id="leg-manual-from" hidden>
           <label>出发城市名<input name="fromName" placeholder="直接输入城市名"></label>
           <label>出发纬度<input name="fromLat" type="number" step="any" placeholder="可选"></label>
@@ -144,7 +164,9 @@
           <label>花费<input name="cost" type="number" step="any" placeholder="0"></label>
         </div>
         <label>备注<textarea name="note" rows="2" placeholder="可选"></textarea></label>
-        <button type="submit" class="primary" id="btn-save-leg">保存交通段</button>
+        <button type="submit" class="primary" id="btn-save-leg">保存修改</button>
+        <button type="button" id="btn-add-return" class="ghost" hidden disabled>⇄ 添加返程</button>
+        <button type="button" class="ghost" data-form-clear="leg">清空</button>
       </form>
 
       <h3 class="card-title">已有数据（可删除）</h3>
@@ -189,6 +211,7 @@
         </div>
         <button type="submit" class="primary">保存日记</button>
         <button type="button" id="btn-diary-cancel" class="ghost" hidden>取消编辑</button>
+        <button type="button" class="ghost" data-form-clear="diary">清空</button>
       </form>
       <h3 class="card-title">日记列表（按日期倒序）</h3>
       <div id="diary-list"></div>
@@ -200,7 +223,10 @@
     <div class="drawer-head"><h2>⚙️ 设置与备份</h2><button class="drawer-close" title="关闭">✕</button></div>
     <div class="drawer-body">
       <div class="card settings-card">
-        <p>所有数据保存在本浏览器 IndexedDB，刷新不丢失。导出/导入包含行程、城市、交通段、点亮状态与心情日记。</p>
+        <div id="stats-bar" class="stats-bar">📊 统计中…</div>
+        <div id="backup-tip" class="backup-tip" hidden>⚠️ 建议导出 JSON 备份，防止清缓存丢失</div>
+        <div id="auth-info" class="stats-bar"></div>
+        <p>数据保存在 Supabase 云端（按账号隔离），照片仅存本机浏览器 IndexedDB。导出/导入包含行程、城市、交通段、点亮状态与心情日记。</p>
         <form id="form-home-city" class="home-city-form">
           <span class="field-label">常驻城市（交通段下拉置顶项，不占用城市列表）</span>
           <label>名称<input name="name" placeholder="如：广州"></label>
@@ -224,6 +250,60 @@
     </div>
   </section>
 
+  <!-- 心愿清单抽屉 -->
+  <section id="drawer-wishlist" class="drawer">
+    <div class="drawer-head"><h2>✨ 心愿清单</h2><button class="drawer-close" title="关闭">✕</button></div>
+    <div class="drawer-body">
+      <div id="wish-summary" class="wish-summary"></div>
+
+      <h3 class="card-title" id="wish-form-title">新增心愿</h3>
+      <div id="edit-banner-wish" class="edit-banner" hidden>正在编辑：<b id="edit-name-wish"></b><button type="button" class="small ghost" id="btn-edit-cancel-wish">取消编辑</button></div>
+      <form id="form-wish" class="card">
+        <label>城市/地区名称 *<input name="nameZh" required placeholder="如：大理 / 冰岛"></label>
+        <div class="field">
+          <span class="field-label">城市预设（可搜索，选中回填省/市/经纬度）</span>
+          <div class="city-picker">
+            <input type="text" id="wish-city-input" placeholder="输入关键词，如：大理" autocomplete="off">
+            <div id="wish-city-list" class="city-preset-list" hidden></div>
+          </div>
+        </div>
+        <div class="row">
+          <label>省/地区<input name="region"></label>
+          <label>城市<input name="city"></label>
+        </div>
+        <div class="row">
+          <label>纬度 lat<input name="lat" type="number" step="any" placeholder="可空"></label>
+          <label>经度 lng<input name="lng" type="number" step="any" placeholder="可空"></label>
+        </div>
+        <label>备注<textarea name="note" rows="2" placeholder="可选"></textarea></label>
+        <div class="row">
+          <label>预估预算（元）<input name="budget" type="number" step="any" min="0" placeholder="0"></label>
+          <label>已攒金额（元）<input name="saved" type="number" step="any" min="0" placeholder="0"></label>
+        </div>
+        <label>计划日期<input type="date" name="targetDate"></label>
+        <button type="submit" class="primary" id="btn-save-wish">保存心愿</button>
+        <button type="button" class="ghost" data-form-clear="wish">清空</button>
+      </form>
+
+      <h3 class="card-title">心愿列表（未完成在前，完成沉底）</h3>
+      <div id="list-wishes"></div>
+    </div>
+  </section>
+
+  <!-- 轨迹播放抽屉 -->
+  <section id="drawer-play" class="drawer">
+    <div class="drawer-head"><h2>▶️ 轨迹播放</h2><button class="drawer-close" title="关闭">✕</button></div>
+    <div class="drawer-body">
+      <label>选择行程
+        <select id="play-trip"></select>
+      </label>
+      <div id="play-stats" class="stats-bar"></div>
+      <button id="btn-start-play" class="primary">▶ 开始播放</button>
+      <p class="hint" id="play-empty" hidden>暂无行程，先去「录入」创建吧。</p>
+      <p class="hint">按到达日期顺序飞往每个城市（无日期城市排最后），连线按交通方式颜色逐段绘制，播放不修改任何数据。</p>
+    </div>
+  </section>
+
   <!-- 照片抽屉 -->
   <section id="drawer-photos" class="drawer">
     <div class="drawer-head"><h2 id="photo-drawer-title">📷 城市照片</h2><button id="photos-close" class="drawer-close" title="关闭照片抽屉" aria-label="关闭照片抽屉">✕</button></div>
@@ -233,6 +313,7 @@
           <input type="file" id="photo-input" accept="image/*" multiple hidden>
         </label>
         <span class="hint">自动压缩：长边 1600px / JPEG 0.8，仅存本机</span>
+        <span class="hint" id="photo-count"></span>
       </div>
       <div id="photo-empty" class="empty" hidden>该城市还没有照片</div>
       <div id="photo-grid" class="photo-grid"></div>
@@ -262,6 +343,7 @@
   <div id="photo-carousel" class="carousel">
     <div class="carousel-inner">
       <button id="pc-close" class="drawer-close" title="关闭">✕</button>
+      <div class="pc-title" id="pc-title"></div>
       <div class="pc-stage">
         <button id="pc-prev" class="pc-arrow" title="上一张">‹</button>
         <img id="pc-img" alt="照片大图">
@@ -274,11 +356,26 @@
 
   <div id="toast" class="toast"></div>
 
+  <!-- 轨迹播放控制条 -->
+  <div id="play-bar" class="play-bar" hidden>
+    <button id="play-pause" class="play-btn">⏸ 暂停</button>
+    <button id="play-replay" class="play-btn">🔄 重播</button>
+    <select id="play-speed" class="play-btn" title="播放速度">
+      <option value="0.5">0.5x</option>
+      <option value="1" selected>1x</option>
+      <option value="2">2x</option>
+    </select>
+    <span id="play-progress" class="play-progress"></span>
+    <button id="play-exit" class="play-btn play-danger">退出播放</button>
+  </div>
+
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="data/china-provinces.js"></script>
   <script src="data/cities.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.0/dist/umd/supabase.min.js"></script>
   <script src="js/db.js"></script>
+  <script src="js/supabase.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
