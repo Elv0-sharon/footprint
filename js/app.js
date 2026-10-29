@@ -303,7 +303,7 @@ function legArrow(a, b, ctrl, color) {
   }
   L.marker(pos, {
     icon: L.divIcon({
-      className: 'fp-arrow-icon', iconSize: [12, 12], iconAnchor: [6, 6],
+      className: 'fp-arrow-icon', iconSize: [6, 10], iconAnchor: [3, 5],
       html: `<div class="fp-arrow" style="transform:rotate(${angle.toFixed(1)}deg);border-bottom-color:${color}"></div>`,
     }),
     interactive: false, keyboard: false,

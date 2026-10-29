@@ -548,15 +548,16 @@ body.auth-lock > *:not(#auth-screen) { display: none !important; }
 }
 .pc-thumb.current { border-color: var(--accent); }
 
-/* 连线末端方向箭头（自绘旋转三角） */
+/* 连线方向箭头（细长流线三角，参考航旅纵横：窄而尖，不压线） */
 .fp-arrow-icon { background: transparent; border: none; }
 .fp-arrow {
   width: 0; height: 0;
-  border-left: 5px solid transparent;
-  border-right: 5px solid transparent;
-  border-bottom: 9px solid #3d5a6c;   /* 颜色由内联 border-bottom-color 覆盖 */
+  border-left: 3px solid transparent;
+  border-right: 3px solid transparent;
+  border-bottom: 10px solid #3d5a6c;   /* 颜色由内联 border-bottom-color 覆盖 */
   transform-origin: center;
-  filter: drop-shadow(0 0 1px rgba(255,255,255,.55));   /* 深/浅底图上都可辨 */
+  filter: drop-shadow(0 0 1.5px rgba(255,255,255,.75));   /* 白色柔光晕，深/浅底图上都可辨 */
+  opacity: .92;
 }
 
 /* 城市搜索选择器 */
