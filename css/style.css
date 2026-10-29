@@ -416,6 +416,46 @@ button.small.ghost:hover { background: var(--btn-hover); }
 .auth-card .hint { margin: 0; min-height: 18px; text-align: center; }
 body.auth-lock > *:not(#auth-screen) { display: none !important; }
 
+/* 头像按钮（顶栏右侧，游客模式入口） */
+.topbar { justify-content: space-between; }
+.avatar-btn {
+  margin-left: auto;
+  max-width: 220px; height: 32px;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 0 12px; border-radius: 16px;
+  border: 1px solid rgba(255,255,255,.35);
+  background: rgba(255,255,255,.14); color: inherit;
+  font-size: 13px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.avatar-btn:hover { background: rgba(255,255,255,.28); }
+
+/* 登录弹窗（点头像打开） */
+.login-modal {
+  position: fixed; inset: 0; z-index: 3000;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,.45); padding: 16px;
+}
+.login-modal[hidden] { display: none; }
+.login-head {
+  display: flex; align-items: center; justify-content: space-between;
+}
+.login-head b { font-size: 16px; color: var(--text); }
+.login-close {
+  min-width: 30px; min-height: 30px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--input-bg); border: 1px solid var(--input-border);
+  color: var(--text); font-size: 16px; line-height: 1;
+  cursor: pointer; padding: 0 8px; border-radius: 8px;
+}
+.login-close:hover { background: var(--input-border); }
+.auth-card .ghost {
+  padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg); color: var(--text); font-size: 14px; cursor: pointer;
+}
+.auth-card .ghost:hover { border-color: var(--accent); color: var(--accent); }
+
 /* 轨迹播放：悬浮控制条 + 城市高亮标记 */
 .play-bar {
   position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);

@@ -1,6 +1,6 @@
-/* ===== Supabase 云端数据层 + 邮箱魔法链接登录 =====
-   五类数据（trips/stops/legs/diaries/wishlist）登录后读写云端；
-   照片 Blob、点亮集合、常驻城市配置仍存本地 IndexedDB。 */
+/* ===== Supabase 云端数据层 + 游客模式（邮箱密码登录可选） =====
+   游客默认直接进地图（数据存 IndexedDB）；登录后五类数据（trips/stops/legs/
+   diaries/wishlist）读写云端；照片 Blob、点亮集合、常驻城市配置仍存本地。 */
 const SUPABASE_URL = 'https://footprint.elv0-sharon.deno.net/sb';
 const SUPABASE_KEY = 'sb_publishable_R6qwy1DK5nWDzD9EOfWm8w_Sc6cY8O6';
 const AUTH_REDIRECT = 'https://elv0-sharon.github.io/footprint/';
@@ -112,51 +112,90 @@ const SBCloud = {
 };
 window.SBCloud = SBCloud;
 
-/* ---- 登录界面 ---- */
-function showLogin() {
-  const el = document.getElementById('auth-screen');
-  if (el) el.hidden = false;
-  document.body.classList.add('auth-lock');
+/* ---- 认证 UI（游客模式：默认直接进地图，点头像弹出登录框） ---- */
+function updateAuthUI() {
+  const btn = document.getElementById('btn-avatar');
+  if (btn) btn.textContent = _sbUser ? ('👤 ' + (_sbUser.email || '已登录')) : '👤 游客';
 }
-function showAppUI() {
-  const el = document.getElementById('auth-screen');
-  if (el) el.hidden = true;
-  document.body.classList.remove('auth-lock');
-  const info = document.getElementById('auth-info');
-  if (info && _sbUser) {
-    info.innerHTML = `👤 ${_sbUser.email || '已登录'} <button id="btn-signout" class="small danger">退出登录</button>`;
-    document.getElementById('btn-signout').addEventListener('click', async () => {
-      const { error } = await sb.auth.signOut();
-      if (error) { toast('退出失败：' + error.message); return; }
-      location.reload();   // 退出后回到登录页
-    });
-  }
+function openLoginModal() {
+  const m = document.getElementById('login-modal');
+  if (m) { m.hidden = false; const em = document.getElementById('login-email'); if (em) em.focus(); }
 }
-async function sendMagicLink() {
-  const email = document.getElementById('auth-email').value.trim();
-  const msg = document.getElementById('auth-msg');
-  if (!sb) { msg.textContent = '云端服务不可用，请检查网络后刷新重试'; return; }
-  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { msg.textContent = '请输入有效邮箱地址'; return; }
-  msg.textContent = '发送中…';
-  const { error } = await sb.auth.signInWithOtp({
-    email,
-    options: { emailRedirectTo: AUTH_REDIRECT },
-  });
-  if (error) { msg.textContent = '发送失败：' + error.message; return; }
-  msg.textContent = '登录链接已发到邮箱，点击邮件里的链接登录';
-}
-function bindAuth() {
-  const btn = document.getElementById('btn-auth-send');
-  if (btn) btn.addEventListener('click', sendMagicLink);
-  const input = document.getElementById('auth-email');
-  if (input) input.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMagicLink(); });
+function closeLoginModal() {
+  const m = document.getElementById('login-modal');
+  if (m) m.hidden = true;
+  const msg = document.getElementById('login-msg');
+  if (msg) msg.textContent = '';
 }
 
-/* ---- 会话初始化：恢复本地会话 + 处理魔法链接回调 + 监听登录状态 ---- */
+/* 邮箱 + 密码登录（老账号） */
+async function doLogin() {
+  const email = document.getElementById('login-email').value.trim();
+  const pw = document.getElementById('login-password').value;
+  const msg = document.getElementById('login-msg');
+  if (!sb) { msg.textContent = '云端服务不可用（网络受限），请稍后重试'; return; }
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { msg.textContent = '请输入有效邮箱地址'; return; }
+  if (!pw || pw.length < 6) { msg.textContent = '请输入密码（至少 6 位）'; return; }
+  msg.textContent = '登录中…';
+  const { error } = await sb.auth.signInWithPassword({ email, password: pw });
+  if (error) { msg.textContent = '登录失败：' + error.message; return; }
+  msg.textContent = '登录成功！';   // SIGNED_IN 事件会关闭弹窗并切云端数据
+}
+
+/* 邮箱 + 密码注册（首次使用；若开启邮箱确认需去邮箱点击确认链接） */
+async function doSignup() {
+  const email = document.getElementById('login-email').value.trim();
+  const pw = document.getElementById('login-password').value;
+  const msg = document.getElementById('login-msg');
+  if (!sb) { msg.textContent = '云端服务不可用（网络受限），请稍后重试'; return; }
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { msg.textContent = '请输入有效邮箱地址'; return; }
+  if (!pw || pw.length < 6) { msg.textContent = '请输入密码（至少 6 位）'; return; }
+  msg.textContent = '注册中…';
+  const { data, error } = await sb.auth.signUp({
+    email, password: pw,
+    options: { emailRedirectTo: AUTH_REDIRECT },
+  });
+  if (error) { msg.textContent = '注册失败：' + error.message; return; }
+  if (data.session) {
+    msg.textContent = '注册成功，已自动登录！';   // SIGNED_IN 事件接管
+  } else {
+    msg.textContent = '注册成功！请到邮箱点击确认链接，然后回来登录';
+  }
+}
+
+function bindAuth() {
+  const modal = document.getElementById('login-modal');
+  const btnLogin = document.getElementById('btn-login');
+  const btnSignup = document.getElementById('btn-signup');
+  const btnClose = document.getElementById('login-close');
+  const email = document.getElementById('login-email');
+  const pw = document.getElementById('login-password');
+  const avatar = document.getElementById('btn-avatar');
+  if (btnLogin) btnLogin.addEventListener('click', doLogin);
+  if (btnSignup) btnSignup.addEventListener('click', doSignup);
+  if (btnClose) btnClose.addEventListener('click', closeLoginModal);
+  if (modal) modal.addEventListener('click', (e) => { if (e.target.id === 'login-modal') closeLoginModal(); });
+  [email, pw].forEach(el => el && el.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); }));
+  // 头像按钮：未登录 → 打开登录框（SDK 不可用也打开，提交时再提示）；已登录 → 询问退出
+  if (avatar) avatar.addEventListener('click', async () => {
+    if (_sbUser) {
+      if (!sb) { toast('云端服务不可用（网络受限）'); return; }
+      if (confirm('已登录 ' + (_sbUser.email || '账号') + '。\n退出后回到游客模式（数据保存在本机）。\n确定退出登录？')) {
+        const { error } = await sb.auth.signOut();
+        if (error) toast('退出失败：' + error.message);   // SIGNED_OUT 事件会刷新页面
+      }
+    } else {
+      openLoginModal();
+    }
+  });
+}
+
+/* ---- 会话初始化：恢复本地会话 + 处理邮箱确认回调 + 监听登录状态 ---- */
+bindAuth();   // 无论云端是否可用都要绑定（头像/登录框交互不依赖 SDK）
 async function sbInit() {
   if (!sb) {
-    const msg = document.getElementById('auth-msg');
-    if (msg) msg.textContent = '云端服务不可用（SDK 加载失败），请检查网络后刷新重试';
+    console.warn('[footprint] 云端不可用，保持游客模式（本地数据）');
+    updateAuthUI();
     window._authReadyResolve(null);
     return;
   }
@@ -170,14 +209,15 @@ async function sbInit() {
   }
   sb.auth.onAuthStateChange((event, session) => {
     _sbUser = session ? session.user : null;
+    updateAuthUI();
     if (event === 'SIGNED_IN') {
-      showAppUI();
-      if (window.startApp) window.startApp();   // 幂等：邮件链接回跳 / 已有会话 / 登录事件统一入口
+      closeLoginModal();
+      if (window.onSignedIn) window.onSignedIn();   // app.js：切云端重载数据
     } else if (event === 'SIGNED_OUT') {
-      showLogin();
+      location.reload();   // 回到游客模式（本地数据）
     }
   });
-  bindAuth();
+  updateAuthUI();
   window._authReadyResolve(_sbUser);
 }
 sbInit();

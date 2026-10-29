@@ -2273,7 +2273,7 @@ async function seedIfEmpty() {
 (async function init() {
   initTheme();
   bindDrawers(); bindForms(); bindSettings(); bindKeyboard(); bindPhotos(); bindWish(); bindPlay();
-  // 登录后才启动应用：数据加载 + 首屏渲染（supabase.js 的 SIGNED_IN 事件也会调用，幂等）
+  // 游客模式：无论是否登录都直接启动（未登录数据走本地 IndexedDB）
   window.startApp = async function () {
     if (window._appStarted) return;
     window._appStarted = true;
@@ -2289,11 +2289,17 @@ async function seedIfEmpty() {
       toast('初始化出错：' + err.message);
     }
   };
-  await window._authReady;          // supabase.js：会话恢复 + 魔法链接回调处理完成
-  if (window._sbUser) {
-    if (typeof showAppUI === 'function') showAppUI();
-    await window.startApp();
-  } else {
-    if (typeof showLogin === 'function') showLogin();
-  }
+  await window._authReady;          // supabase.js：会话恢复完成（游客不等待登录）
+  await window.startApp();
+  // 登录成功后（supabase.js SIGNED_IN 事件调用）：从云端重载五类数据并整体刷新
+  window.onSignedIn = async function () {
+    try {
+      window._appStarted = false;   // 允许完整重跑启动流程
+      await window.startApp();
+      toast('已登录，数据已切换为云端同步');
+    } catch (err) {
+      console.error(err);
+      toast('云端数据加载失败：' + err.message);
+    }
+  };
 })();
