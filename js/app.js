@@ -2583,9 +2583,14 @@ function bindSettings() {
   };
   await window._authReady;          // supabase.js：会话恢复完成（游客不等待登录）
   await window.startApp();
-  if (window._sbUser) window.syncAllPhotos().then(r => {   // 启动时已登录：补一次照片双向同步
-    if (r.up || r.down || r.fail) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张（下次登录自动补传）` : ''));
-  }).catch(e => console.warn('[footprint] 照片同步失败：', e));
+  if (window._sbUser) {   // 启动时已登录：自动执行一次本机→云端迁移（幂等，云端同 id 跳过）
+    window.mergeLocalToCloud().then(async m => {
+      if (m.up) { toast(`本机记录已上传云端 ${m.up} 条`); await reload(); }   // 有新增才提示并刷新
+    }).catch(e => console.warn('[footprint] 启动迁移失败：', e));
+    window.syncAllPhotos().then(r => {   // 补一次照片双向同步
+      if (r.up || r.down || r.fail) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张（下次登录自动补传）` : ''));
+    }).catch(e => console.warn('[footprint] 照片同步失败：', e));
+  }
   // 登录成功后（supabase.js SIGNED_IN 事件调用）：从云端重载五类数据并整体刷新
   window.onSignedIn = async function () {
     try {
@@ -2595,7 +2600,7 @@ function bindSettings() {
       catch (e) { console.warn('[footprint] 本机数据合并失败：', e); }
       const c = await window.startApp();
       const cnt = c ? `（云端：行程 ${c.trips} / 城市 ${c.stops} / 交通段 ${c.legs} / 日记 ${c.diaries} / 心愿 ${c.wish}）` : '';
-      toast('已登录，数据已切换为云端同步' + (merged.up ? `，已上传本机 ${merged.up} 条 ` : ' ') + cnt);
+      toast('已登录，数据已切换为云端同步' + (merged.up ? `，本机记录已上传云端 ${merged.up} 条 ` : ' ') + cnt);
       const r = await window.syncAllPhotos();
       if (r.up || r.down || r.fail) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张（下次登录自动补传）` : ''));
     } catch (err) {
