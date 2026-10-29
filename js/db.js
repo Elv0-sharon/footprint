@@ -123,6 +123,12 @@ const DB = {
   delPhoto: (id) => _del('photos', id),
   getAllPhotos: () => _getAll('photos'),   // 云端同步用：全量本地照片（含 blob）
 
+  // 登录合并用：直接读本地 IndexedDB 五表（绕过云端路由，拿游客期间录入的数据）
+  getLocalAll: async () => ({
+    trips: await _getAll('trips'), stops: await _getAll('stops'), legs: await _getAll('legs'),
+    diaries: await _getAll('diaries'), wishlist: await _getAll('wishlist'),
+  }),
+
   // 用户主动"清空全部数据"：连照片一起清；登录状态同时清空云端，防止刷新/重登后被同步回来
   clearAll: async () => {
     if (window.SBCloud && window._sbUser) {

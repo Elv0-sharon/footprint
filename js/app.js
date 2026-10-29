@@ -2553,8 +2553,11 @@ function bindSettings() {
   window.onSignedIn = async function () {
     try {
       window._appStarted = false;   // 允许完整重跑启动流程
+      let merged = { up: 0 };
+      try { merged = await window.mergeLocalToCloud(); }   // 游客期间录入的本机数据并入云端
+      catch (e) { console.warn('[footprint] 本机数据合并失败：', e); }
       await window.startApp();
-      toast('已登录，数据已切换为云端同步');
+      toast('已登录，数据已切换为云端同步' + (merged.up ? `，已上传本机 ${merged.up} 条` : ''));
       const r = await window.syncAllPhotos();
       if (r.up || r.down || r.fail) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张（下次登录自动补传）` : ''));
     } catch (err) {
