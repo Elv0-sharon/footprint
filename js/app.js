@@ -49,7 +49,7 @@ function initTheme() {
 /* 瓦片层：初始化时浅/深两层一次性创建，切换主题只切可见性，绝不 new / 移除重建 */
 function createTileLayers() {
   if (_tilesReady) return;
-  const opts = { subdomains: '1234', maxZoom: 18, attribution: '© 高德地图 GS(2023)4197号' };
+  const opts = { subdomains: '1234', maxZoom: 18, noWrap: true, attribution: '© 高德地图 GS(2023)4197号' };
   _tileLight = L.tileLayer(TILE_URLS.light, opts);
   _tileDark = L.tileLayer(TILE_URLS.dark, opts);
   [_tileLight, _tileDark].forEach(layer => {
@@ -222,7 +222,17 @@ function legCoords(p) {
 /* ===== 地图 ===== */
 function initMap() {
   if (_mapReady) return;
-  map = L.map('map', { zoomControl: true, doubleClickZoom: false }).setView([35, 105], 4);
+  map = L.map('map', {
+    zoomControl: true, doubleClickZoom: false,
+    maxBounds: [[-85, -180], [85, 180]],   // 锁定在世界地图范围内，不出灰底
+    maxBoundsViscosity: 1.0,
+  }).setView([35, 105], 4);
+  // 动态最小缩放：保证视野恰好装下一张完整世界地图（屏越大允许的 minZoom 越大）
+  setTimeout(() => {
+    if (!_mapReady || !map) return;
+    const size = map.getSize();
+    if (size.x && size.y) map.setMinZoom(Math.max(2, Math.ceil(Math.log2(Math.max(size.x / 256, size.y / 256)))));
+  }, 0);
   // 初始化即创建浅/深两个瓦片层（对象常驻，切换主题绝不 new）
   createTileLayers();
   // 容器宽高可能晚于地图初始化就绪：DOM 就绪 + window load 各刷一次尺寸，确保瓦片铺满
