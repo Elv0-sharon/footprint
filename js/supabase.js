@@ -1,7 +1,7 @@
 /* ===== Supabase 云端数据层 + 邮箱魔法链接登录 =====
    五类数据（trips/stops/legs/diaries/wishlist）登录后读写云端；
    照片 Blob、点亮集合、常驻城市配置仍存本地 IndexedDB。 */
-const SUPABASE_URL = 'https://bysvetvsfmjfbrpkorad.supabase.co';
+const SUPABASE_URL = 'https://footprint.elv0-sharon.deno.net/sb';
 const SUPABASE_KEY = 'sb_publishable_R6qwy1DK5nWDzD9EOfWm8w_Sc6cY8O6';
 const AUTH_REDIRECT = 'https://elv0-sharon.github.io/footprint/';
 
