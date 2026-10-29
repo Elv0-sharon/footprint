@@ -2526,27 +2526,6 @@ function bindSettings() {
   });
 }
 
-/* ===== 示例数据（仅当无行程时预置） ===== */
-async function seedIfEmpty() {
-  if (TRIPS.length) return;
-  const tripId = uid();
-  const gz = { id: uid(), tripId, nameZh: '广州', nameEn: 'Guangzhou', country: '中国', region: '广东', city: '广州',
-    lat: 23.1291, lng: 113.2644, arriveDate: '2024-04-30', leaveDate: '2024-05-02', weather: '多云', mood: '兴奋',
-    companions: '朋友', cost: 1200, note: '出发地，吃了一顿早茶。' };
-  const xa = { id: uid(), tripId, nameZh: '西安', nameEn: "Xi'an", country: '中国', region: '陕西', city: '西安',
-    lat: 34.3416, lng: 108.9398, arriveDate: '2024-05-02', leaveDate: '2024-05-05', weather: '晴', mood: '满足',
-    companions: '朋友', cost: 1800, note: '看兵马俑、逛回民街。' };
-  const leg = { id: uid(), tripId, fromStopId: gz.id, toStopId: xa.id, mode: 'plane',
-    departAt: '2024-05-02T09:30', arriveAt: '2024-05-02T12:10', cost: 980, note: '直飞约 2.5 小时。' };
-  const trip = { id: tripId, title: '广州—西安', dateStart: '2024-04-30', dateEnd: '2024-05-05',
-    note: '示例行程：从广州飞往西安。' };
-  await DB.putTrip(trip); await DB.putStop(gz); await DB.putStop(xa); await DB.putLeg(leg);
-  // 示例点亮状态
-  await DB.putVisitedProvince('广东'); await DB.putVisitedProvince('陕西');
-  await DB.putVisitedCity({ name: '广州', region: '广东', lat: gz.lat, lng: gz.lng });
-  await DB.putVisitedCity({ name: '西安', region: '陕西', lat: xa.lat, lng: xa.lng });
-}
-
 /* ===== 启动 ===== */
 (async function init() {
   initTheme();
@@ -2556,8 +2535,6 @@ async function seedIfEmpty() {
     if (window._appStarted) return;
     window._appStarted = true;
     try {
-      await loadAll();
-      await seedIfEmpty();
       await loadAll();
       await loadPhotoIndex();
       await refreshCoverUrls();
