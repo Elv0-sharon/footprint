@@ -1331,6 +1331,7 @@ function buildTimeline(seq, segs) {
     phases.push({ type: 'seg', i, start: t, end: t += SEG_MS });
     phases.push({ type: 'city', i, start: t, end: t += DWELL_MS });
   }
+  if (segs[seq.length]) phases.push({ type: 'seg', i: seq.length, start: t, end: t += SEG_MS });   // 离场段（返回常驻地）
   phases.push({ type: 'end', start: t, end: t += END_MS });
   return { phases, total: t };
 }
@@ -1378,6 +1379,32 @@ function buildSegments(seq) {
       for (let k = 0; k <= N; k++) pts.push([A[0] + (B[0] - A[0]) * k / N, A[1] + (B[1] - A[1]) * k / N]);
     }
     segs[i] = { hasLeg: !!leg, pts, color: st.color, from: A, to: B, ctrl };
+  }
+  // 尾段（离场）：最后一段旅程结束后，若存在「离开末城返回常驻地/其他城市」的交通段，也纳入播放
+  if (seq.length) {
+    const last = seq[seq.length - 1];
+    const leg = LEGS.find(l => {
+      if (used.has(l.id)) return false;
+      const f = legEndpointRaw(l, 'from'), t = legEndpointRaw(l, 'to');
+      return endpointHitsStop(f, last) && !seq.some(s => endpointHitsStop(t, s));
+    }) || null;
+    if (leg) {
+      const r = legEndpointRaw(leg, 'to');
+      const B = (r.lat != null && r.lat !== '' && r.lng != null && r.lng !== '') ? [Number(r.lat), Number(r.lng)] : null;
+      if (B) {
+        used.add(leg.id);
+        const stl = legStyle(leg.mode);
+        const A = [last.lat, last.lng];
+        let pts, ctrl = null;
+        if (leg.mode === 'plane') { ctrl = curveCtrl(A, B); pts = planeCurve(A, B, ctrl); }
+        else {
+          pts = [];
+          const N = 24;
+          for (let k = 0; k <= N; k++) pts.push([A[0] + (B[0] - A[0]) * k / N, A[1] + (B[1] - A[1]) * k / N]);
+        }
+        segs[seq.length] = { hasLeg: true, pts, color: stl.color, from: A, to: B, ctrl, outbound: true };
+      }
+    }
   }
   return segs;
 }
@@ -1438,8 +1465,12 @@ function playLoop(now) {
         const d = el && el.querySelector('.play-runner');
         if (d) d.classList.add('play-fade');
       }
-      st.endTarget = map.getBoundsZoom(L.latLngBounds(st.seq.map(c => [c.lat, c.lng])), false, L.point(50, 50));
-      st.endCenter = L.latLngBounds(st.seq.map(c => [c.lat, c.lng])).getCenter();
+      // 收尾视野：覆盖全部城市 + 离场段终点（返回常驻地）
+      const endPts = st.seq.map(c => [c.lat, c.lng]);
+      if (st.segs[st.seq.length] && st.segs[st.seq.length].outbound) endPts.push(st.segs[st.seq.length].to);
+      const endBounds = L.latLngBounds(endPts);
+      st.endTarget = map.getBoundsZoom(endBounds, false, L.point(50, 50));
+      st.endCenter = endBounds.getCenter();
       st.zoomStart = st.zoom;
       st.zoomStartCam = map.getCenter();
     }
@@ -1455,7 +1486,8 @@ function playLoop(now) {
       st.segLine.setLatLngs(pts.slice(0, i0 + 1).concat([head]));   // 线条像画出来一样连续生长
     }
     if (st.runner) st.runner.setLatLng(head);                       // 光点连续移动不瞬移
-    const z1 = playZoomFor(phase.i ? st.seq[phase.i - 1] : null, st.seq[phase.i]);
+    const curCity = st.seq[phase.i] || { lat: st.seg.to[0], lng: st.seg.to[1] };   // 离场段：终点为常驻地等非城市坐标
+    const z1 = playZoomFor(phase.i ? st.seq[phase.i - 1] : null, curCity);
     playCamera(head, st.zoomStart + (z1 - st.zoomStart) * te);      // 中心=光点，缩放平滑过渡
     if (te >= 1 && !st.arrowShown) { st.arrowShown = true; addPlayArrow(seg); }   // 生长完成后箭头淡入
   } else if (phase.type === 'intro' && !st.paused) {    // 开场：缓动飞向进出场段起点（常驻地）或首城
