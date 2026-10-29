@@ -360,8 +360,8 @@ function renderMap() {
           pts = [A, B];
         }
         const tp = legTimePopup(leg);   // 时间为空的侧不显示
-        // 全部实线，线宽 3
-        L.polyline(pts, { color: st.color, weight: 3, opacity: 0.9 })
+        // 全部实线，线宽 2
+        L.polyline(pts, { color: st.color, weight: 2, opacity: 0.9 })
           .bindPopup(`<b>${st.icon} ${st.label}</b><br>${esc(pa.name)} → ${esc(pb.name)}${tp ? '<br>' + tp : ''}<br>花费: ${money(leg.cost)}`)
           .addTo(_legGroup);
         legArrow(A, B, ctrl, st.color);   // 线段中部方向箭头，指向 to 端
@@ -1273,7 +1273,7 @@ function animateSegment(seg) {
   return new Promise(resolve => {
     const st = _play;
     const pts = seg.pts;
-    const line = L.polyline([pts[0]], { color: seg.color, weight: 3, opacity: 0.9 }).addTo(_playGroup);
+    const line = L.polyline([pts[0]], { color: seg.color, weight: 2, opacity: 0.9 }).addTo(_playGroup);
     const runner = L.marker(pts[0], {
       icon: L.divIcon({
         className: 'play-runner-icon', iconSize: [14, 14], iconAnchor: [7, 7],
