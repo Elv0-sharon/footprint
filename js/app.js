@@ -182,6 +182,7 @@ async function loadAll() {
   WISHES = await DB.getWishlist();
   const hc = await DB.getConfig('homeCity');
   if (hc && hc.name) HOME_CITY = { name: hc.name, lat: Number(hc.lat), lng: Number(hc.lng) };
+  return { trips: TRIPS.length, stops: STOPS.length, legs: LEGS.length, diaries: DIARIES.length, wish: WISHES.length };
 }
 async function reload() {
   await loadAll();
@@ -2567,13 +2568,14 @@ function bindSettings() {
   bindDrawers(); bindForms(); bindSettings(); bindKeyboard(); bindPhotos(); bindWish(); bindPlay();
   // 游客模式：无论是否登录都直接启动（未登录数据走本地 IndexedDB）
   window.startApp = async function () {
-    if (window._appStarted) return;
+    if (window._appStarted) return null;
     window._appStarted = true;
     try {
-      await loadAll();
+      const counts = await loadAll();
       await loadPhotoIndex();
       await refreshCoverUrls();
       refreshSelects(); renderLegend(); initMap(); renderTimeline(); renderLists(); renderDiaries(); renderWishes(); renderStats();
+      return counts;
     } catch (err) {
       console.error(err);
       toast('初始化出错：' + err.message);
@@ -2591,8 +2593,9 @@ function bindSettings() {
       let merged = { up: 0 };
       try { merged = await window.mergeLocalToCloud(); }   // 游客期间录入的本机数据并入云端
       catch (e) { console.warn('[footprint] 本机数据合并失败：', e); }
-      await window.startApp();
-      toast('已登录，数据已切换为云端同步' + (merged.up ? `，已上传本机 ${merged.up} 条` : ''));
+      const c = await window.startApp();
+      const cnt = c ? `（云端：行程 ${c.trips} / 城市 ${c.stops} / 交通段 ${c.legs} / 日记 ${c.diaries} / 心愿 ${c.wish}）` : '';
+      toast('已登录，数据已切换为云端同步' + (merged.up ? `，已上传本机 ${merged.up} 条 ` : ' ') + cnt);
       const r = await window.syncAllPhotos();
       if (r.up || r.down || r.fail) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张（下次登录自动补传）` : ''));
     } catch (err) {
