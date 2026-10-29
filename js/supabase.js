@@ -128,6 +128,28 @@ function closeLoginModal() {
   if (msg) msg.textContent = '';
 }
 
+/* 网络偶发被重置（Failed to fetch）时自动重试，最多 3 次尝试 */
+async function authRetry(fn) {
+  let lastErr = null;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const res = await fn();
+      if (!res.error) return res;
+      lastErr = res.error;
+      if (!/fetch|network/i.test(res.error.message || '')) return res;   // 非网络错误不重试
+    } catch (e) {
+      lastErr = e;
+      if (!/fetch|network/i.test(String(e && e.message))) throw e;
+    }
+    await new Promise(r => setTimeout(r, 800 * (i + 1)));
+  }
+  return { data: null, error: lastErr };
+}
+function netErrMsg(e) {
+  const m = (e && e.message) || String(e);
+  return /fetch|network/i.test(m) ? '网络请求失败（可能被拦截或波动），已自动重试仍不通，请稍后多试几次' : m;
+}
+
 /* 邮箱 + 密码登录（老账号） */
 async function doLogin() {
   const email = document.getElementById('login-email').value.trim();
@@ -137,8 +159,8 @@ async function doLogin() {
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { msg.textContent = '请输入有效邮箱地址'; return; }
   if (!pw || pw.length < 6) { msg.textContent = '请输入密码（至少 6 位）'; return; }
   msg.textContent = '登录中…';
-  const { error } = await sb.auth.signInWithPassword({ email, password: pw });
-  if (error) { msg.textContent = '登录失败：' + error.message; return; }
+  const { error } = await authRetry(() => sb.auth.signInWithPassword({ email, password: pw }));
+  if (error) { msg.textContent = '登录失败：' + netErrMsg(error); return; }
   msg.textContent = '登录成功！';   // SIGNED_IN 事件会关闭弹窗并切云端数据
 }
 
@@ -150,12 +172,12 @@ async function doSignup() {
   if (!sb) { msg.textContent = '云端服务不可用（网络受限），请稍后重试'; return; }
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { msg.textContent = '请输入有效邮箱地址'; return; }
   if (!pw || pw.length < 6) { msg.textContent = '请输入密码（至少 6 位）'; return; }
-  msg.textContent = '注册中…';
-  const { data, error } = await sb.auth.signUp({
+  msg.textContent = '注册中…（网络不稳会自动重试）';
+  const { data, error } = await authRetry(() => sb.auth.signUp({
     email, password: pw,
     options: { emailRedirectTo: AUTH_REDIRECT },
-  });
-  if (error) { msg.textContent = '注册失败：' + error.message; return; }
+  }));
+  if (error) { msg.textContent = '注册失败：' + netErrMsg(error); return; }
   if (data.session) {
     msg.textContent = '注册成功，已自动登录！';   // SIGNED_IN 事件接管
   } else {

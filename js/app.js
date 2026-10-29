@@ -1003,6 +1003,8 @@ function renderWishList() {
     const tags = [];
     if (w.region || w.city) tags.push(esc([w.region, w.city].filter(Boolean).join(' / ')));
     if (w.targetDate) tags.push('🗓 ' + esc(w.targetDate));
+    const hasCoord = !(w.lat == null || w.lat === '' || w.lng == null || w.lng === '');
+    if (!hasCoord) tags.push('📍 地图未标记（编辑补选城市坐标）');
     const pct = wishProgressPct(w);
     return `<div class="data-block wish-row${w.done ? ' wish-done' : ''}">`
       + `<input type="checkbox" class="wish-check" data-wish-check="${w.id}"${w.done ? ' checked' : ''} title="标记完成">`
@@ -1040,13 +1042,24 @@ function wishPopupHtml(w) {
 function renderWishMarkers() {
   if (!_wishGroup) return;
   _wishGroup.clearLayers();
+  // 按坐标分组：同地点多条心愿横向散开，避免星星完全重叠看似只标了一处
+  const groups = new Map();
   WISHES.forEach(w => {
     if (w.lat == null || w.lng == null || w.lat === '' || w.lng === '') return;
     const lat = Number(w.lat), lng = Number(w.lng);
     if (isNaN(lat) || isNaN(lng)) return;
-    L.marker([lat, lng], { icon: wishStarIcon(w) })
-      .bindPopup(() => wishPopupHtml(w))
-      .addTo(_wishGroup);
+    const key = lat.toFixed(3) + ',' + lng.toFixed(3);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ w, lat, lng });
+  });
+  groups.forEach(list => {
+    const n = list.length;
+    list.forEach((it, i) => {
+      const off = n > 1 ? (i - (n - 1) / 2) * 2.4 : 0;   // 同点多条时经度散开（度）
+      L.marker([it.lat, it.lng + off], { icon: wishStarIcon(it.w) })
+        .bindPopup(() => wishPopupHtml(it.w))
+        .addTo(_wishGroup);
+    });
   });
 }
 function renderWishes() {
