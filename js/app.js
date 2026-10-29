@@ -2073,11 +2073,13 @@ function bindPhotos() {
       if (!f.type || !f.type.startsWith('image/')) { fail++; continue; }
       try {
         const blob = await compressImage(f);
-        await DB.putPhoto({
+        const rec = {
           id: uid(), stopId: _photoStopId, blob,
           caption: '', shootDate: new Date().toISOString().slice(0, 10), author: '',
           createdAt: new Date().toISOString(),
-        });
+        };
+        await DB.putPhoto(rec);
+        if (window._sbUser) window.mirrorPhoto(rec, blob);   // 登录时镜像到云端（含文件）
         ok++;
       } catch (err) {
         console.error('[footprint] 照片压缩/入库失败：', f.name, err);
@@ -2117,6 +2119,7 @@ function bindPhotos() {
     p.author = document.getElementById('lb-author').value.trim();
     p.caption = document.getElementById('lb-caption').value;
     await DB.putPhoto(p);
+    if (window._sbUser) window.mirrorPhoto(p, null);   // 仅更新云端元数据
     closeLightbox();
     toast('注释已保存');
   });
@@ -2150,6 +2153,7 @@ function bindPhotos() {
     if (!p) return;
     if (!confirm('确定删除这张照片？删除后不可恢复。')) return;
     await DB.delPhoto(p.id);
+    window.unmirrorPhoto(p.id);   // 登录时一并删除云端文件与元数据
     _stopPhotos = _stopPhotos.filter(x => x.id !== p.id);
     const coverStop = STOPS.find(x => x.coverPhotoId === p.id);
     if (coverStop) { coverStop.coverPhotoId = ''; await DB.putStop(coverStop); }
@@ -2304,12 +2308,17 @@ async function seedIfEmpty() {
   };
   await window._authReady;          // supabase.js：会话恢复完成（游客不等待登录）
   await window.startApp();
+  if (window._sbUser) window.syncAllPhotos().then(r => {   // 启动时已登录：补一次照片双向同步
+    if (r.up || r.down) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张` : ''));
+  }).catch(e => console.warn('[footprint] 照片同步失败：', e));
   // 登录成功后（supabase.js SIGNED_IN 事件调用）：从云端重载五类数据并整体刷新
   window.onSignedIn = async function () {
     try {
       window._appStarted = false;   // 允许完整重跑启动流程
       await window.startApp();
       toast('已登录，数据已切换为云端同步');
+      const r = await window.syncAllPhotos();
+      if (r.up || r.down) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张` : ''));
     } catch (err) {
       console.error(err);
       toast('云端数据加载失败：' + err.message);

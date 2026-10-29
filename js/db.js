@@ -121,6 +121,7 @@ const DB = {
   })),
   putPhoto: (p) => _put('photos', p),
   delPhoto: (id) => _del('photos', id),
+  getAllPhotos: () => _getAll('photos'),   // 云端同步用：全量本地照片（含 blob）
 
   // 用户主动"清空全部数据"：连照片一起清
   clearAll: () => _clear('trips')

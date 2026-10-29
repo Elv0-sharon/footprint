@@ -112,6 +112,98 @@ const SBCloud = {
 };
 window.SBCloud = SBCloud;
 
+/* ---- 照片云端同步：文件存 Storage（bucket: photos，路径 userId/photoId），元数据存 photos 表 ---- */
+const SBPhotos = {
+  async upsertMeta(rec, uid) {
+    const row = {
+      id: rec.id, user_id: uid, stop_id: rec.stopId || null,
+      shoot_date: nv(rec.shootDate), author: nv(rec.author), caption: nv(rec.caption),
+      created_at: rec.createdAt || new Date().toISOString(),
+      storage_path: `${uid}/${rec.id}`,
+    };
+    const { error } = await sb.from('photos').upsert(row);
+    if (error) throw error;
+  },
+  async uploadBlob(rec, blob, uid) {
+    const { error } = await sb.storage.from('photos').upload(`${uid}/${rec.id}`, blob, {
+      upsert: true, contentType: (blob && blob.type) || 'image/jpeg', cacheControl: '31536000',
+    });
+    if (error && !/exists|Duplicate/i.test(error.message || '')) throw error;
+  },
+  async remove(uid, id) {
+    await sb.storage.from('photos').remove([`${uid}/${id}`]);
+    const { error } = await sb.from('photos').delete().eq('id', id);
+    if (error) throw error;
+  },
+  async listMeta(uid) {
+    const { data, error } = await sb.from('photos').select('*').eq('user_id', uid);
+    if (error) throw error;
+    return (data || []).map(r => ({
+      id: r.id, stopId: r.stop_id || '', shootDate: fv(r.shoot_date), author: fv(r.author),
+      caption: fv(r.caption), createdAt: r.created_at || '', storagePath: r.storage_path || `${uid}/${r.id}`,
+    }));
+  },
+  publicUrl(storagePath) {
+    const { data } = sb.storage.from('photos').getPublicUrl(storagePath);
+    return data ? data.publicUrl : null;
+  },
+};
+
+// 单张照片镜像到云端（上传/编辑注释后调用；失败不打断本地流程，登录时会自动补同步）
+window.mirrorPhoto = async function (rec, blob) {
+  if (!sb || !_sbUser) return false;
+  try {
+    const uid = _sbUser.id;
+    if (blob) await SBPhotos.uploadBlob(rec, blob, uid);
+    await SBPhotos.upsertMeta(rec, uid);
+    return true;
+  } catch (e) {
+    console.warn('[footprint] 照片云端同步失败：', e);
+    toast('照片云端同步失败，下次登录时会自动补传');
+    return false;
+  }
+};
+window.unmirrorPhoto = async function (id) {
+  if (!sb || !_sbUser) return;
+  try { await SBPhotos.remove(_sbUser.id, id); }
+  catch (e) { console.warn('[footprint] 云端照片删除失败：', e); }
+};
+
+// 双向同步：本地多出的自动上传，云端多出的自动下载到本机缓存；完成后刷新索引/封面/地图
+window.syncAllPhotos = async function () {
+  if (!sb || !_sbUser) return { up: 0, down: 0, fail: 0 };
+  const uid = _sbUser.id;
+  const cloud = await SBPhotos.listMeta(uid);
+  const cloudIds = new Set(cloud.map(c => c.id));
+  const localAll = (await DB.getAllPhotos()).filter(p => p && p.blob);
+  const localIds = new Set(localAll.map(p => p.id));
+  let up = 0, down = 0, fail = 0;
+  for (const p of localAll) {                       // 上传：本地有、云端没有
+    if (cloudIds.has(p.id)) continue;
+    try { await SBPhotos.uploadBlob(p, p.blob, uid); await SBPhotos.upsertMeta(p, uid); up++; }
+    catch (e) { console.warn('[footprint] 照片上传失败：', p.id, e); fail++; }
+  }
+  for (const c of cloud) {                          // 下载：云端有、本地没有
+    if (localIds.has(c.id)) continue;
+    try {
+      const resp = await fetch(SBPhotos.publicUrl(c.storagePath));
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const blob = await resp.blob();
+      await DB.putPhoto({ id: c.id, stopId: c.stopId, blob, caption: c.caption, shootDate: c.shootDate, author: c.author, createdAt: c.createdAt });
+      down++;
+    } catch (e) { console.warn('[footprint] 照片下载失败：', c.id, e); fail++; }
+  }
+  if (up || down) {
+    try {
+      if (typeof loadPhotoIndex === 'function') await loadPhotoIndex();
+      if (typeof refreshCoverUrls === 'function') await refreshCoverUrls();
+      if (typeof renderPhotoGrid === 'function') await renderPhotoGrid();
+      if (typeof renderMap === 'function') renderMap();
+    } catch (e) { console.warn('[footprint] 照片同步后刷新失败：', e); }
+  }
+  return { up, down, fail };
+};
+
 /* ---- 认证 UI（游客模式：默认直接进地图，点头像弹出登录框） ---- */
 function updateAuthUI() {
   const btn = document.getElementById('btn-avatar');
