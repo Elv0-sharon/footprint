@@ -1417,6 +1417,45 @@ function playZoomFor(prev, cur) {
   if (d < 8) return 10;
   return 9;
 }
+// 播放用瓦片预取：镜头到达前先把沿路瓦片拉进浏览器缓存，避免画面来不及加载
+const _prefetched = new Set();
+function prefetchTile(z, x, y) {
+  const max = Math.pow(2, z);
+  if (x < 0 || x >= max || y < 0 || y >= max) return 0;
+  const key = z + '/' + x + '/' + y;
+  if (_prefetched.has(key)) return 0;
+  _prefetched.add(key);
+  const tpl = TILE_URLS[_theme] || TILE_URLS.light;
+  const img = new Image();
+  img.src = tpl.replace('{s}', String((Math.abs(x + y) % 4) + 1)).replace('{x}', x).replace('{y}', y).replace('{z}', z);
+  return 1;
+}
+function prefetchTilesAlong(pts, zoom) {
+  if (!pts || !pts.length || zoom == null) return;
+  const scale = Math.pow(2, zoom);   // 瓦片数（注意不是像素数 256×2^z）
+  let n = 0;
+  const step = Math.max(1, Math.floor(pts.length / 24));   // 沿路径最多采 24 个点
+  for (let i = 0; i < pts.length && n < 48; i += step) {
+    const p = pts[i];
+    const latRad = Math.max(-85, Math.min(85, p[0])) * Math.PI / 180;
+    const x = Math.floor((p[1] + 180) / 360 * scale);
+    const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * scale);
+    // 目标级别 + 低一级（过渡帧也能即时呈现）
+    n += prefetchTile(zoom, x, y) + prefetchTile(Math.max(2, zoom - 1), Math.floor(x / 2), Math.floor(y / 2));
+  }
+}
+function prefetchTilesBounds(bounds, zoom) {
+  if (!bounds || zoom == null) return;
+  const scale = Math.pow(2, zoom);
+  const nw = bounds.getNorthWest(), se = bounds.getSouthEast();
+  const x0 = Math.floor((nw.lng + 180) / 360 * scale), x1 = Math.floor((se.lng + 180) / 360 * scale);
+  const y0 = Math.floor((1 - Math.log(Math.tan(nw.lat * Math.PI / 180) + 1 / Math.cos(nw.lat * Math.PI / 180)) / Math.PI) / 2 * scale);
+  const y1 = Math.floor((1 - Math.log(Math.tan(se.lat * Math.PI / 180) + 1 / Math.cos(se.lat * Math.PI / 180)) / Math.PI) / 2 * scale);
+  let n = 0;
+  for (let x = Math.min(x0, x1); x <= Math.max(x0, x1) && n < 64; x++)
+    for (let y = Math.min(y0, y1); y <= Math.max(y0, y1) && n < 64; y++)
+      n += prefetchTile(zoom, x, y);
+}
 // 播放主循环：全局时间戳驱动，暂停冻结时间累积，退出后 rAF 不再续订
 function playLoop(now) {
   const st = _play;
@@ -1440,6 +1479,7 @@ function playLoop(now) {
     } else if (phase.type === 'seg') {
       st.zoomStart = st.zoom;
       st.seg = st.segs[phase.i];
+      prefetchTilesAlong(st.seg.pts, playZoomFor(phase.i ? st.seq[phase.i - 1] : null, st.seq[phase.i] || { lat: st.seg.to[0], lng: st.seg.to[1] }));   // 提前加载本段沿路瓦片
       st.segLine = st.seg.hasLeg
         ? L.polyline([st.seg.pts[0]], { color: st.seg.color, weight: 2, opacity: 0.9, interactive: false }).addTo(_playGroup)
         : null;                                         // 无 Leg 的跳跃段：光点移动但不画线
@@ -1454,6 +1494,7 @@ function playLoop(now) {
     } else if (phase.type === 'intro') {
       st.zoomStart = st.zoom;
       st.zoomStartCam = map.getCenter();
+      prefetchTilesAlong([[st.introTo.lat, st.introTo.lng]], playZoomFor(null, st.seq[0]));   // 预取首城周边瓦片
     } else if (phase.type === 'end') {
       if (st.segLine && st.seg) {                       // 最后一段同样补满 + 箭头
         st.segLine.setLatLngs(st.seg.pts);
@@ -1473,6 +1514,7 @@ function playLoop(now) {
       st.endCenter = endBounds.getCenter();
       st.zoomStart = st.zoom;
       st.zoomStartCam = map.getCenter();
+      prefetchTilesBounds(endBounds, st.endTarget);   // 预取全国视图瓦片
     }
   }
   const span = phase.end - phase.start;
