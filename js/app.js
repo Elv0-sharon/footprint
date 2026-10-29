@@ -849,14 +849,32 @@ function renderLists() {
   if (!LEGS.length) {
     lEl.innerHTML = '<p class="empty">暂无交通段。</p>';
   } else {
-    lEl.innerHTML = LEGS.map(l => {
-      const pa = legEndpoint(l, 'from'), pb = legEndpoint(l, 'to');
-      const st = legStyle(l.mode);
-      return `<div class="data-block"><div class="data-row"><span class="txt"><b>${st.icon} ${st.label}</b>`
-        + `<div class="sub">${esc(tripTitle(l.tripId))}</div>`
-        + `<div class="sub">${esc(pa ? pa.name : '?')} → ${esc(pb ? pb.name : '?')}｜${[legTimeLine(l), l.cost == null ? '' : money(l.cost)].filter(Boolean).join('｜')}</div>`
-        + `</span><button class="small ghost" data-edit="leg" data-id="${l.id}">编辑</button> `
-        + `<button class="small" data-del="leg" data-id="${l.id}">删除</button></div></div>`;
+    // 按旅程分组：行程新的排上面（时间久远的往下放），组内按出发时间从早到晚
+    const byTrip = new Map();
+    LEGS.forEach(l => {
+      const k = l.tripId || '__none';
+      if (!byTrip.has(k)) byTrip.set(k, []);
+      byTrip.get(k).push(l);
+    });
+    const tripEndDate = id => {
+      const t = TRIPS.find(x => x.id === id);
+      return (t && (t.dateEnd || t.dateStart)) || '';
+    };
+    const groups = [...byTrip.entries()].sort((a, b) => tripEndDate(b[0]).localeCompare(tripEndDate(a[0])));
+    lEl.innerHTML = groups.map(([tid, legs]) => {
+      legs.sort((a, b) => (a.departAt || '9999').localeCompare(b.departAt || '9999'));
+      const t = TRIPS.find(x => x.id === tid);
+      const head = t
+        ? `<div class="card-title">🧳 ${esc(t.title)}${(t.dateStart || t.dateEnd) ? `　<span class="sub">${fmt(t.dateStart)}${t.dateEnd ? ' ~ ' + fmt(t.dateEnd) : ''}</span>` : ''}</div>`
+        : '<div class="card-title">未归属行程</div>';
+      return head + legs.map(l => {
+        const pa = legEndpoint(l, 'from'), pb = legEndpoint(l, 'to');
+        const st = legStyle(l.mode);
+        return `<div class="data-block"><div class="data-row"><span class="txt"><b>${st.icon} ${st.label}</b>`
+          + `<div class="sub">${esc(pa ? pa.name : '?')} → ${esc(pb ? pb.name : '?')}｜${[legTimeLine(l), l.cost == null ? '' : money(l.cost)].filter(Boolean).join('｜')}</div>`
+          + `</span><button class="small ghost" data-edit="leg" data-id="${l.id}">编辑</button> `
+          + `<button class="small" data-del="leg" data-id="${l.id}">删除</button></div></div>`;
+      }).join('');
     }).join('');
   }
 }
