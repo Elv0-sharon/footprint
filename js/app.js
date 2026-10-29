@@ -2553,6 +2553,27 @@ function bindSettings() {
     e.target.value = '';
   });
 
+  const btnSyncUp = document.getElementById('btn-sync-up');
+  if (btnSyncUp) btnSyncUp.addEventListener('click', async () => {
+    if (!window._sbUser) { toast('请先登录（右上角头像），登录后才能上传到云端'); return; }
+    btnSyncUp.disabled = true;
+    const old = btnSyncUp.textContent; btnSyncUp.textContent = '上传中…';
+    try {
+      const m = await window.mergeLocalToCloud();
+      if (m.up) {
+        await reload();
+        toast(`本机记录已上传云端 ${m.up} 条` + (m.fail ? `，失败 ${m.fail} 条（可再点一次重试）` : ''));
+      } else if (m.fail) {
+        toast(`上传失败 ${m.fail} 条（网络波动），请稍后重试`);
+      } else {
+        toast('本机数据已全部在云端，无需上传');
+      }
+    } catch (e) {
+      toast('上传失败：' + e.message);
+    }
+    btnSyncUp.disabled = false; btnSyncUp.textContent = old;
+  });
+
   document.getElementById('btn-clear').addEventListener('click', async () => {
     if (!confirm('将清空全部行程、城市、交通段、点亮状态、日记和照片，且无法恢复。确定清空？')) return;
     if (!confirm('二次确认：真的要清空所有数据吗？')) return;
@@ -2585,7 +2606,8 @@ function bindSettings() {
   await window.startApp();
   if (window._sbUser) {   // 启动时已登录：自动执行一次本机→云端迁移（幂等，云端同 id 跳过）
     window.mergeLocalToCloud().then(async m => {
-      if (m.up) { toast(`本机记录已上传云端 ${m.up} 条`); await reload(); }   // 有新增才提示并刷新
+      if (m.up) await reload();   // 有新增才刷新
+      if (m.up || m.fail) toast(`本机记录已上传云端 ${m.up} 条` + (m.fail ? `，失败 ${m.fail} 条（设置里可手动重传）` : ''));
     }).catch(e => console.warn('[footprint] 启动迁移失败：', e));
     window.syncAllPhotos().then(r => {   // 补一次照片双向同步
       if (r.up || r.down || r.fail) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张（下次登录自动补传）` : ''));
@@ -2600,7 +2622,7 @@ function bindSettings() {
       catch (e) { console.warn('[footprint] 本机数据合并失败：', e); }
       const c = await window.startApp();
       const cnt = c ? `（云端：行程 ${c.trips} / 城市 ${c.stops} / 交通段 ${c.legs} / 日记 ${c.diaries} / 心愿 ${c.wish}）` : '';
-      toast('已登录，数据已切换为云端同步' + (merged.up ? `，本机记录已上传云端 ${merged.up} 条 ` : ' ') + cnt);
+      toast('已登录，数据已切换为云端同步' + (merged.up ? `，本机记录已上传云端 ${merged.up} 条` : '') + (merged.fail ? `，上传失败 ${merged.fail} 条（设置里可手动重传）` : '') + ' ' + cnt);
       const r = await window.syncAllPhotos();
       if (r.up || r.down || r.fail) toast(`照片已同步：上传 ${r.up} 张，下载 ${r.down} 张` + (r.fail ? `，失败 ${r.fail} 张（下次登录自动补传）` : ''));
     } catch (err) {

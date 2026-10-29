@@ -190,14 +190,14 @@ window.unmirrorPhoto = async function (id) {
 
 // 登录合并：把游客期间录入的本机数据（按 id 去重）并入云端，手机等其它设备登录同一账号即可看到
 window.mergeLocalToCloud = async function () {
-  if (!sb || !_sbUser || !DB.getLocalAll) return { up: 0 };
+  if (!sb || !_sbUser || !DB.getLocalAll) return { up: 0, fail: 0 };
   const uid = _sbUser.id;
   const local = await DB.getLocalAll();
   const plan = [
     ['trips', t => SBCloud.putTrip(t)], ['stops', s => SBCloud.putStop(s)], ['legs', l => SBCloud.putLeg(l)],
     ['diaries', d => SBCloud.putDiary(d)], ['wishlist', w => SBCloud.putWish(w)],
   ];
-  let up = 0;
+  let up = 0, fail = 0;
   for (const [table, put] of plan) {          // 顺序 trips→stops→legs 满足外键依赖
     let cloudIds = new Set();
     try {
@@ -208,10 +208,10 @@ window.mergeLocalToCloud = async function () {
     for (const item of (local[table] || [])) {
       if (!item || !item.id || cloudIds.has(item.id)) continue;   // 云端已有同 id：不动
       try { await put(item); up++; }
-      catch (e) { console.warn('[footprint] 合并上传失败：', table, item.id, e); }
+      catch (e) { console.warn('[footprint] 合并上传失败：', table, item.id, e); fail++; }
     }
   }
-  return { up };
+  return { up, fail };
 };
 
 // 双向同步：本地多出的自动上传，云端多出的自动下载到本机缓存；完成后刷新索引/封面/地图
