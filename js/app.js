@@ -302,6 +302,17 @@ function planeCurve(a, b, ctrl) {
   return pts;
 }
 
+// 陆路"轨道式"连线（高铁/火车）：沿行进方向左侧弓出，去程靠左、回程自动落在另一侧（双轨效果）
+function isRailMode(mode) { return mode === 'highspeed' || mode === 'train'; }
+// m 为同向偏移档位：1 = 第一条，2 = 同向第二条再往外错开
+function trackCtrl(a, b, m) {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const dist = Math.hypot(dx, dy) || 1;
+  const gap = Math.max(0.03, Math.min(0.6, dist * 0.03));
+  const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+  return [mx + (dy / dist) * gap * m * 2, my - (dx / dist) * gap * m * 2];   // 行进方向左侧法向偏移
+}
+
 // 两点间罗盘方位角（度）：CSS rotate 的 0deg 指向正北，顺时针为正
 function bearingDeg(from, to) {
   const dx = (to[1] - from[1]) * Math.cos(((from[0] + to[0]) / 2) * Math.PI / 180);
@@ -352,9 +363,18 @@ function renderMap() {
         groups.get(key).push({ leg, A, B });
       });
       const offsets = new Map();
+      const railOffsets = new Map();
       groups.forEach(list => {
         list.sort((x, y) => (x.leg.departAt || '').localeCompare(y.leg.departAt || '') || x.leg.id.localeCompare(y.leg.id));
         const n = list.length;
+        // 轨道式（高铁/火车）：按各自行进方向左侧排档；往返自动分居两侧，同向多条依次外扩
+        const dirRank = new Map();
+        list.forEach(item => {
+          const dk = (item.A[0] < item.B[0] || (item.A[0] === item.B[0] && item.A[1] <= item.B[1])) ? 0 : 1;
+          const r = dirRank.get(dk) || 0;
+          dirRank.set(dk, r + 1);
+          railOffsets.set(item.leg.id, r + 1);
+        });
         // 组内统一法向量：去程/回程分居两侧，同向多段依次错开
         const dx = list[0].B[0] - list[0].A[0], dy = list[0].B[1] - list[0].A[1];
         const dist = Math.hypot(dx, dy) || 1;
@@ -377,6 +397,10 @@ function renderMap() {
         const st = legStyle(leg.mode);
         let pts, ctrl = null;
         if (leg.mode === 'plane') { ctrl = curveCtrl(A, B); pts = planeCurve(A, B, ctrl); }
+        else if (isRailMode(leg.mode)) {
+          ctrl = trackCtrl(A, B, railOffsets.get(leg.id) || 1);   // 轨道式：去程靠左、回程靠右
+          pts = planeCurve(A, B, ctrl);
+        }
         else {
           const off = offsets.get(leg.id);
           if (off && (Math.abs(off.ctrl[0] - (A[0] + B[0]) / 2) > 1e-9 || Math.abs(off.ctrl[1] - (A[1] + B[1]) / 2) > 1e-9)) {
@@ -1373,6 +1397,9 @@ function buildSegments(seq) {
     if (leg && leg.mode === 'plane') {
       ctrl = curveCtrl(A, B);
       pts = planeCurve(A, B, ctrl);                            // 弧线按贝塞尔参数取点
+    } else if (leg && isRailMode(leg.mode)) {
+      ctrl = trackCtrl(A, B, 1);                               // 轨道式：与地图连线一致（行进方向左偏）
+      pts = planeCurve(A, B, ctrl);
     } else {
       pts = [];
       const N = 24;                                            // 直线线性插值
@@ -1397,6 +1424,7 @@ function buildSegments(seq) {
         const A = [last.lat, last.lng];
         let pts, ctrl = null;
         if (leg.mode === 'plane') { ctrl = curveCtrl(A, B); pts = planeCurve(A, B, ctrl); }
+        else if (isRailMode(leg.mode)) { ctrl = trackCtrl(A, B, 1); pts = planeCurve(A, B, ctrl); }
         else {
           pts = [];
           const N = 24;
@@ -1434,8 +1462,8 @@ function prefetchTilesAlong(pts, zoom) {
   if (!pts || !pts.length || zoom == null) return;
   const scale = Math.pow(2, zoom);   // 瓦片数（注意不是像素数 256×2^z）
   let n = 0;
-  const step = Math.max(1, Math.floor(pts.length / 24));   // 沿路径最多采 24 个点
-  for (let i = 0; i < pts.length && n < 48; i += step) {
+  const step = Math.max(1, Math.floor(pts.length / 32));   // 沿路径最多采 32 个点
+  for (let i = 0; i < pts.length && n < 72; i += step) {
     const p = pts[i];
     const latRad = Math.max(-85, Math.min(85, p[0])) * Math.PI / 180;
     const x = Math.floor((p[1] + 180) / 360 * scale);
@@ -1476,6 +1504,8 @@ function playLoop(now) {
       st.segLine = null; st.seg = null;
       showPlayMarker(st.seq[phase.i]);                  // 城市弹性淡入（已到城市永久保留）
       updatePlayProgress(phase.i + 1, n);
+      const nx = st.segs[phase.i + 1];                  // 停留期间预取下一段沿路瓦片（镜头到达前热缓存）
+      if (nx) prefetchTilesAlong(nx.pts, playZoomFor(st.seq[phase.i], st.seq[phase.i + 1] || { lat: nx.to[0], lng: nx.to[1] }));
     } else if (phase.type === 'seg') {
       st.zoomStart = st.zoom;
       st.seg = st.segs[phase.i];
@@ -1522,6 +1552,11 @@ function playLoop(now) {
   const te = easeInOutCubic(tp);
   if (phase.type === 'seg' && !st.paused) {             // 路径生长 + 光点 + 相机跟随
     const seg = st.seg, pts = seg.pts;
+    if (te > 0.6 && !st['_pf' + phase.i]) {             // 后半程前瞻预取下一段，镜头到达前热好缓存
+      st['_pf' + phase.i] = 1;
+      const nx = st.segs[phase.i + 1];
+      if (nx) prefetchTilesAlong(nx.pts, playZoomFor(st.seq[phase.i], st.seq[phase.i + 1] || { lat: nx.to[0], lng: nx.to[1] }));
+    }
     const head = pathPoint(pts, te);
     if (st.segLine) {
       const fi = te * (pts.length - 1), i0 = Math.floor(fi);
