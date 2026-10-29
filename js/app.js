@@ -10,6 +10,7 @@ const _cityGeoCache = new Map();
 let _editingDiaryId = null;
 let _editingTripId = null, _editingStopId = null, _editingLegId = null, _editingWishId = null;
 let _legDirty = false;   // Leg 编辑表单是否有改动（控制"添加返程"按钮可用）
+let _legAutoArrive = ''; // 出发时间自动同步到到达时间的最近一次值（用于识别到达时间是否被手动改过）
 
 /* 照片模块状态 */
 let _photoStopId = null, _stopPhotos = [], _thumbUrls = [];
@@ -780,6 +781,7 @@ function legFormEndpoint(f, end) {
 function resetLegForm() {
   _editingLegId = null;
   _legDirty = false;
+  _legAutoArrive = '';
   const f = document.getElementById('form-leg');
   f.reset();
   updateLegManualVisibility();
@@ -980,6 +982,8 @@ function startEditLeg(id) {
   f.mode.value = l.mode || 'plane';
   f.departAt.value = l.departAt || '';
   f.arriveAt.value = l.arriveAt || '';
+  // 编辑已有段：若到达时间原与出发时间相同，改出发时间时保持两者联动
+  _legAutoArrive = (l.departAt && l.arriveAt && l.arriveAt === l.departAt) ? l.arriveAt : '';
   f.cost.value = (l.cost == null ? '' : l.cost);
   f.note.value = l.note || '';
   const pa = legEndpoint(l, 'from'), pb = legEndpoint(l, 'to');
@@ -1748,6 +1752,13 @@ function bindForms() {
   // 编辑态任一字段改动 → "添加返程"变为可点
   legForm.addEventListener('input', () => { if (_editingLegId) { _legDirty = true; syncReturnBtn(); } });
   legForm.addEventListener('change', () => { if (_editingLegId) { _legDirty = true; syncReturnBtn(); } });
+  // 出发时间输入时自动同步到达时间：到达时间为空或仍是上次自动同步值时才覆盖；手动改过的到达时间不吞
+  legForm.departAt.addEventListener('input', () => {
+    if (!legForm.arriveAt.value || legForm.arriveAt.value === _legAutoArrive) {
+      legForm.arriveAt.value = legForm.departAt.value;
+      _legAutoArrive = legForm.arriveAt.value;
+    }
+  });
   // 添加返程：反向生成一条新 Leg（原段不动），路线名称/时间/花费/备注留空
   document.getElementById('btn-add-return').addEventListener('click', async () => {
     if (!_editingLegId || !_legDirty) return;
