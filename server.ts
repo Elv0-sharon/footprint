@@ -40,7 +40,13 @@ Deno.serve(async (req) => {
   }
 
   if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers: CORS });
+    const h = new Headers(CORS);
+    // 动态回显预检声明的头与方法：放行 accept-profile/content-profile 等 SDK 请求头，避免固定白名单漏项导致预检失败
+    const reqHeaders = req.headers.get('access-control-request-headers');
+    if (reqHeaders) h.set('Access-Control-Allow-Headers', reqHeaders);
+    const reqMethod = req.headers.get('access-control-request-method');
+    if (reqMethod) h.set('Access-Control-Allow-Methods', reqMethod);
+    return new Response(null, { status: 204, headers: h });
   }
 
   const path = url.pathname.slice(3) || '/';
