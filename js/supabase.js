@@ -121,14 +121,35 @@ const SBCloud = {
     const uid = await requireUser();
     await SBPhotos.clearAll(uid);
   },
-  // JSON 导入：清空当前用户五表后逐条写入（照片/点亮/配置走本地）
+  // JSON 导入：先 upsert 全部行，成功后再删除导入包之外的旧行。
+  // 不再"先清空再写"：中途任何一条失败都不会把云端旧数据清掉，避免导入失败后丢数据。
+  // data 必须是 db.js sanitizeImportData 清洗后的数据（无孤儿外键引用）。
   async importAll(data) {
-    await this.clearAll();
-    for (const t of (data.trips || [])) await this.trips.put(t);
-    for (const s of (data.stops || [])) await this.stops.put(s);
-    for (const l of (data.legs || [])) await this.legs.put(l);
-    for (const d of (data.diaries || [])) await this.diaries.put(d);
-    for (const w of (data.wishlist || [])) await this.wishlist.put(w);
+    const uid = await requireUser();
+    const writes = [
+      ['trips', data.trips || []], ['stops', data.stops || []], ['legs', data.legs || []],
+      ['diaries', data.diaries || []], ['wishlist', data.wishlist || []],
+    ];
+    for (const [table, items] of writes) {          // 顺序 trips→stops→legs 满足外键依赖
+      for (const item of items) {
+        if (!item || !item.id) continue;
+        await this[table].put(item);
+      }
+    }
+    // 全部写入成功后才清理旧行；子表先删（legs/diaries→stops→trips），避免外键约束阻止删除
+    const prunes = [
+      ['legs', data.legs || []], ['diaries', data.diaries || []], ['stops', data.stops || []],
+      ['trips', data.trips || []], ['wishlist', data.wishlist || []],
+    ];
+    for (const [table, items] of prunes) {
+      const ids = items.map(x => x && x.id).filter(Boolean);
+      const { error } = await authRetry(() => {
+        let q = sb.from(table).delete().eq('user_id', uid);
+        if (ids.length) q = q.not('id', 'in', `(${ids.join(',')})`);
+        return q;
+      });
+      if (error) throw error;
+    }
   },
 };
 window.SBCloud = SBCloud;

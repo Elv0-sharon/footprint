@@ -257,7 +257,7 @@
         <div id="backup-tip" class="backup-tip" hidden>⚠️ 建议导出 JSON 备份，防止清缓存丢失</div>
         <div id="auth-info" class="stats-bar"></div>
         <p>文字数据与照片均保存在 Supabase 云端（按账号隔离，登录后多设备自动同步）；照片文件另在本机缓存一份。导出/导入包含行程、城市、交通段、点亮状态与心情日记。</p>
-        <p class="hint">提示：请固定使用 <b>footprint.elv0-sharon.deno.net</b> 一个站点登录；本地文件（file://）与网站是两套独立存储。若旧数据在本地文件里，先在本地文件「导出全部 JSON」，再在本站登录后「从 JSON 导入」即可上传云端。</p>
+        <p class="hint">提示：deno.net 与 github.io 是同一套账号，换站点只需重新登录，<b>不用重新注册</b>；登录态按站点独立。点亮状态与常驻城市仍保存在当前浏览器（换站点/设备时用「导出全部 JSON」→ 登录后「导入」迁移）。</p>
         <form id="form-home-city" class="home-city-form">
           <span class="field-label">常驻城市（交通段下拉置顶项，不占用城市列表）</span>
           <label>名称<input name="name" placeholder="如：广州"></label>
@@ -415,6 +415,7 @@
   </script>
   <script src="js/vendor/leaflet.js"></script>
   <script>if (typeof L === 'undefined') document.write('<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"\n          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""><\/script>');</script>
+  <script src="data/china-provinces.js"></script>
   <script src="data/cities.js"></script>
   <script src="js/vendor/supabase.min.js"></script>
   <script>if (typeof supabase === 'undefined') document.write('<script src="https://unpkg.com/@supabase/supabase-js@2.45.0/dist/umd/supabase.min.js"><\/script>');</script>

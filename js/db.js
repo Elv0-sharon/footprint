@@ -103,6 +103,74 @@ async function delCloudAndLocal(store, key, cloudFn) {
   return result;
 }
 
+/* 导入前清洗：云端表带外键（stops.trip_id → trips，legs.trip_id/from_stop_id/to_stop_id → trips/stops，
+   diaries 也引用行程/城市）。旧版本留下的孤儿行程/城市引用会让整批云端导入在外键处中断，
+   所以先剔除无主行程/城市，把失效端点降级为手动地点；返回清洗结果和明细用于提示。 */
+function sanitizeImportData(input) {
+  const skipped = { stops: 0, legs: 0, diaries: 0, converted: 0, details: [] };
+  const data = { ...input };
+  const trips = (Array.isArray(data.trips) ? data.trips : []).filter(t => t && t.id);
+  const tripIds = new Set(trips.map(t => String(t.id)));
+
+  const stops = [];
+  for (const s of (Array.isArray(data.stops) ? data.stops : [])) {
+    if (!s || !s.id) { skipped.stops++; skipped.details.push('城市记录缺少 id，已跳过'); continue; }
+    if (!s.tripId || !tripIds.has(String(s.tripId))) {
+      skipped.stops++;
+      skipped.details.push(`城市「${s.nameZh || s.id}」所属行程不存在，已跳过`);
+      continue;
+    }
+    stops.push(s);
+  }
+  const stopIds = new Set(stops.map(s => String(s.id)));
+
+  // 端点若有 kind:stop 但指向已被剔除的城市，转成 custom（保留名称/坐标，不再触发外键）
+  function cleanEndpoint(ep, legacyStopId, legId, endLabel) {
+    if (ep && ep.kind) {
+      if (ep.kind !== 'stop') return ep;
+      const sid = ep.stopId || legacyStopId;
+      if (!sid) return ep;                                  // 无 stopId：写入时就是 null，不会触发外键
+      if (stopIds.has(String(sid))) return { ...ep, stopId: sid };
+      skipped.converted++;
+      skipped.details.push(`交通段 ${legId} 的${endLabel}城市已不存在，改为手动地点`);
+      return { kind: 'custom', name: ep.name || '', lat: ep.lat ?? null, lng: ep.lng ?? null };
+    }
+    if (legacyStopId) {                                     // 旧结构 fromStopId/toStopId
+      if (stopIds.has(String(legacyStopId))) return { kind: 'stop', stopId: legacyStopId };
+      skipped.converted++;
+      skipped.details.push(`交通段 ${legId} 的${endLabel}城市已不存在，改为手动地点`);
+      return { kind: 'custom', name: '', lat: null, lng: null };
+    }
+    return ep;
+  }
+
+  const legs = [];
+  for (const l of (Array.isArray(data.legs) ? data.legs : [])) {
+    if (!l || !l.id) { skipped.legs++; skipped.details.push('交通段记录缺少 id，已跳过'); continue; }
+    if (!l.tripId || !tripIds.has(String(l.tripId))) {
+      skipped.legs++;
+      skipped.details.push(`交通段 ${l.id} 所属行程不存在，已跳过`);
+      continue;
+    }
+    legs.push({ ...l,
+      from: cleanEndpoint(l.from, l.fromStopId, l.id, '出发'),
+      to:   cleanEndpoint(l.to, l.toStopId, l.id, '到达'),
+    });
+  }
+
+  const diaries = (Array.isArray(data.diaries) ? data.diaries : []).map(d => {
+    if (!d) return d;
+    let out = d, changed = false;
+    if (d.tripId && !tripIds.has(String(d.tripId))) { out = { ...out, tripId: '' }; changed = true; }
+    if (d.stopId && !stopIds.has(String(d.stopId))) { out = { ...out, stopId: '' }; changed = true; }
+    if (changed) { skipped.diaries++; skipped.details.push(`日记 ${d.id} 关联的行程/城市不存在，已解除关联`); }
+    return out;
+  });
+
+  return { data: { ...data, trips, stops, legs, diaries }, skipped };
+}
+window.sanitizeImportData = sanitizeImportData;
+
 const DB = {
   // 五类数据：登录后走 Supabase 云端（SBCloud），游客/照片/点亮/配置走本地 IndexedDB
   getTrips: () => readCloudOrLocal('trips', () => SBCloud.getTrips()),
@@ -205,21 +273,24 @@ const DB = {
     if (!data || !Array.isArray(data.trips) || !Array.isArray(data.stops) || !Array.isArray(data.legs)) {
       throw new Error('JSON 结构不正确（需包含 trips/stops/legs 数组）');
     }
+    // 先清洗孤儿引用，避免云端外键错误导致整批导入中断；返回明细供 UI 提示
+    const { data: clean, skipped } = sanitizeImportData(data);
     // 五类数据：登录时先覆盖云端当前账号（失败会抛出，本机数据此时还没动）；
     // 成功后把导入内容同步写回本机五表，作为离线缓存。
-    if (_cloudOn()) await SBCloud.importAll(data);
+    if (_cloudOn()) await SBCloud.importAll(clean);
     await _clear('trips'); await _clear('stops'); await _clear('legs'); await _clear('diaries'); await _clear('wishlist');
-    for (const t of (data.trips || [])) await _put('trips', t);
-    for (const s of (data.stops || [])) await _put('stops', s);
-    for (const l of (data.legs || [])) await _put('legs', l);
-    for (const d of (data.diaries || [])) await _put('diaries', d);
-    for (const w of (data.wishlist || [])) await _put('wishlist', w);
+    for (const t of clean.trips) await _put('trips', t);
+    for (const s of clean.stops) await _put('stops', s);
+    for (const l of clean.legs) await _put('legs', l);
+    for (const d of clean.diaries) await _put('diaries', d);
+    for (const w of (clean.wishlist || [])) await _put('wishlist', w);
     // 点亮集合/常驻城市配置仍走本地 IndexedDB
-    const vp = Array.isArray(data.visitedProvinces) ? data.visitedProvinces : [];
-    const vc = Array.isArray(data.visitedCities) ? data.visitedCities : [];
+    const vp = Array.isArray(clean.visitedProvinces) ? clean.visitedProvinces : [];
+    const vc = Array.isArray(clean.visitedCities) ? clean.visitedCities : [];
     await _clear('visitedProvinces'); await _clear('visitedCities');
     for (const n of vp) if (n) await _put('visitedProvinces', { name: n });
     for (const c of vc) if (c && c.name) await _put('visitedCities', c);
-    if (data.homeCity && data.homeCity.name != null) await _put('config', data.homeCity);
+    if (clean.homeCity && clean.homeCity.name != null) await _put('config', clean.homeCity);
+    return skipped;
   },
 };

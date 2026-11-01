@@ -553,7 +553,8 @@ async function ensureProvinceData() {
     _provinceData = window.CHINA_GEOJSON;
   } else {
     try {
-      const res = await fetch('https://geo.datav.aliyun.com/areas_v3/bound/100000_full.json');
+      // no-referrer：DataV 对带 github.io Referer 的请求返回 403 HTML，必须去掉 Referer 才能拿到 GeoJSON
+      const res = await fetch('https://geo.datav.aliyun.com/areas_v3/bound/100000_full.json', { referrerPolicy: 'no-referrer' });
       _provinceData = await res.json();
     } catch (e) { console.warn('[footprint] 省界 GeoJSON 加载失败（不影响其余功能）', e); }
   }
@@ -673,7 +674,7 @@ async function drillToProvince(adcode, provName, bounds) {
   try {
     let data = _cityGeoCache.get(adcode);
     if (!data) {
-      const res = await fetch(`https://geo.datav.aliyun.com/areas_v3/bound/${adcode}_full.json`);
+      const res = await fetch(`https://geo.datav.aliyun.com/areas_v3/bound/${adcode}_full.json`, { referrerPolicy: 'no-referrer' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       data = await res.json();
       if (!data || !Array.isArray(data.features) || !data.features.length) throw new Error('EMPTY_DATA');
@@ -1379,6 +1380,7 @@ function bindWish() {
    3) 预取只取目标级别、低优先级、限量并发，避免和可视瓦片抢带宽；
    4) 隐藏业务城市圆点/省界外轮廓，只保留播放图层。 */
 let _playGroup = null, _play = null;
+let _orphanLegReported = false;   // 诊断：缺 tripId 的旧 leg 只打印一次
 const SEG_MS = 2500, DWELL_MS = 1000, END_MS = 1800, INTRO_MS = 1200, HOME_MS = 700;
 const MIN_SEG_MS = 1800, MAX_SEG_MS = 8000;
 const easeInOutCubic = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
@@ -1398,31 +1400,37 @@ function isHomeCity(city) {
   if ((city.nameZh || '').trim() === (HOME_CITY.name || '').trim()) return true;
   return isHomeCoord([city.lat, city.lng]);
 }
-// 解析 Leg 端点为可匹配对象（stop→stopId；home→常驻城名称/坐标；custom→名称/坐标）
-function legEndpointRaw(l, end) {
-  const e = l[end];
-  if (e && e.kind === 'home') {
-    return { name: (e.name || (HOME_CITY && HOME_CITY.name) || '').trim(), lat: e.lat == null ? (HOME_CITY && HOME_CITY.lat) : e.lat, lng: e.lng == null ? (HOME_CITY && HOME_CITY.lng) : e.lng };
-  }
-  if (e && e.kind) return { name: e.name, lat: e.lat, lng: e.lng };
-  return { stopId: l[end + 'StopId'] };
+// 播放专用规范化端点：保留 stopId，名称/坐标复用静态 legEndpoint
+function legPlayEndpoint(leg, end) {
+  const raw = leg[end] || {};
+  const resolved = legEndpoint(leg, end);
+  if (!resolved) return null;
+  return {
+    kind: raw.kind,
+    stopId: raw.stopId || null,
+    name: resolved.name,
+    lat: resolved.lat == null ? null : Number(resolved.lat),
+    lng: resolved.lng == null ? null : Number(resolved.lng),
+  };
 }
-// 端点是否命中某个行程城市：stopId 直配；否则按名称或坐标（<0.05°）匹配（常驻地≈同名城市）
+// 端点是否命中某个行程城市：stopId 直配 → 名称归一化 → 坐标容差；任一端解析不出直接 false
 function endpointHitsStop(r, stop) {
   if (!r || !stop) return false;
-  if (r.stopId) return r.stopId === stop.id;
-  const n = (r.name || '').trim();
-  if (n && n === (stop.nameZh || '').trim()) return true;
-  if (r.lat != null && r.lng != null && r.lat !== '' && r.lng !== '') {
+  if (r.stopId) return r.stopId === stop.id;   // stopId 直配最优先，禁止按名字跨行程猜
+  const rn = normCity(String(r.name || '').trim());
+  const sn = normCity(String(stop.nameZh || '').trim());
+  if (rn && sn && rn === sn) return true;
+  if (r.lat != null && r.lng != null && stop.lat != null && stop.lng != null) {
     return Math.abs(Number(r.lat) - Number(stop.lat)) < 0.05 && Math.abs(Number(r.lng) - Number(stop.lng)) < 0.05;
   }
   return false;
 }
-function legBetween(prevId, curId) {
+// 只在当前行程的 leg 池里找相邻城市之间的交通段
+function legBetween(prevId, curId, pool) {
   const prev = stopById(prevId), cur = stopById(curId);
   if (!prev || !cur) return null;
-  return LEGS.find(l => {
-    const f = legEndpointRaw(l, 'from'), t = legEndpointRaw(l, 'to');
+  return (pool || []).find(l => {
+    const f = legPlayEndpoint(l, 'from'), t = legPlayEndpoint(l, 'to');
     return (endpointHitsStop(f, prev) && endpointHitsStop(t, cur)) || (endpointHitsStop(f, cur) && endpointHitsStop(t, prev));
   }) || null;
 }
@@ -1485,34 +1493,55 @@ function orientedGeom(geom, leg, A, B) {
 }
 // 播放前预读：把行程城市、每段 Leg 的完整路径点、时长、目标缩放一次性构建进内存，播放中零查询
 // segs[i] = 进入 seq[i] 的段（i>=1 为相邻城市间；i===0 为「从常驻地/外部进入首城」的进出场段，可能为 null）
-function buildSegments(seq) {
+function buildSegments(seq, tripId) {
   const segs = [];
   const used = new Set();   // 一条 Leg 只分配给一个段，避免去/返共用时重复播放
+  if (!_orphanLegReported) {
+    _orphanLegReported = true;
+    const orphanLegs = LEGS.filter(l => !l.tripId);
+    console.log('[footprint][play-diag] orphan legs missing tripId:', orphanLegs.length, orphanLegs.map(l => l.id));
+  }
+  const myLegs = tripId ? LEGS.filter(l => l.tripId === tripId) : [];   // 只使用当前行程；孤儿段不纳入
   const geom = computeLegGeometries();   // 与地图连线共用同一套路径点/轨道偏移
   for (let i = 0; i < seq.length; i++) {
     let leg = null, A = null, fromName = '', toName = seq[i].nameZh || '';
     const B = [seq[i].lat, seq[i].lng];
     if (i > 0) {
-      leg = legBetween(seq[i - 1].id, seq[i].id);
+      leg = legBetween(seq[i - 1].id, seq[i].id, myLegs);
       if (leg && used.has(leg.id)) leg = null;
       A = [seq[i - 1].lat, seq[i - 1].lng];
       fromName = seq[i - 1].nameZh || '';
     } else {
-      // 首城：若存在「从常驻地/外部进入首城」的交通段，也纳入播放（起点不能就是首城自己）
-      leg = LEGS.find(l => {
+      // 首城进场段：只允许起点是常驻地或手动点（home/custom），且只看当前行程的 leg
+      leg = myLegs.find(l => {
         if (used.has(l.id)) return false;
-        const f = legEndpointRaw(l, 'from'), t = legEndpointRaw(l, 'to');
+        if (!l.from || (l.from.kind !== 'home' && l.from.kind !== 'custom')) return false;
+        const f = legPlayEndpoint(l, 'from'), t = legPlayEndpoint(l, 'to');
+        if (!f || !t) return false;
         return endpointHitsStop(t, seq[0]) && !endpointHitsStop(f, seq[0]);
       }) || null;
       if (leg) {
-        const r = legEndpointRaw(leg, 'from');
-        A = (r.lat != null && r.lat !== '' && r.lng != null && r.lng !== '') ? [Number(r.lat), Number(r.lng)] : null;
-        if (!A) leg = null;   // 进场端缺坐标：跳过该段
-        else fromName = endpointName(leg, 'from', (HOME_CITY && HOME_CITY.name) || '出发地');
+        const r = legPlayEndpoint(leg, 'from');
+        A = (r && r.lat != null && r.lat !== '' && r.lng != null && r.lng !== '') ? [Number(r.lat), Number(r.lng)] : null;
+        if (!A) {
+          console.log('[footprint][play-diag] seg 0 inbound-no-coords', { legId: leg.id, mode: leg.mode, from: r });
+          leg = null;   // 进场端缺坐标：跳过该段
+        } else {
+          fromName = endpointName(leg, 'from', (HOME_CITY && HOME_CITY.name) || '出发地');
+        }
       }
     }
     if (leg) { used.add(leg.id); toName = seq[i].nameZh || endpointName(leg, 'to', ''); }
-    if (!A) { segs[i] = null; continue; }
+    if (!A) {
+      console.log('[footprint][play-diag] seg', i, {
+        from: fromName || (i ? seq[i - 1].nameZh : null),
+        to: toName,
+        legId: leg ? leg.id : null,
+        mode: leg ? leg.mode : null,
+        A: null, B,
+      });
+      segs[i] = null; continue;
+    }
     const mode = leg ? leg.mode : 'jump';
     const st = legStyle(leg ? leg.mode : 'train');
     let pts, ctrl = null, segA = A, segB = B;
@@ -1526,6 +1555,11 @@ function buildSegments(seq) {
       ms: segDuration(segA, segB, mode),
       zoom: playZoomFor(i ? seq[i - 1] : null, seq[i]),
     };
+    console.log('[footprint][play-diag] seg', i, {
+      from: fromName, to: toName,
+      legId: leg ? leg.id : null, mode: leg ? leg.mode : null,
+      A: segA, B: segB, rawA: A, rawB: B, hasLeg: !!leg,
+    });
   }
   // 没有登记「常驻地 → 首城」交通段时，补一段从常驻地出发的动画（沿用行程第一段的交通方式，不画虚线）
   if (!segs[0] && seq.length && !isHomeCity(seq[0])) {
@@ -1540,17 +1574,24 @@ function buildSegments(seq) {
       ms: segDuration(A, B, infer),
       zoom: playZoomFor(null, seq[0]),
     };
+    console.log('[footprint][play-diag] seg 0 synthetic-inbound', {
+      from: HOME_CITY.name, to: seq[0].nameZh,
+      legId: null, mode: infer, A, B,
+    });
   }
   // 尾段（离场）：最后一段旅程结束后，若存在「离开末城返回常驻地/其他城市」的交通段，也纳入播放
   if (seq.length) {
     const last = seq[seq.length - 1];
-    const leg = LEGS.find(l => {
+    const leg = myLegs.find(l => {
       if (used.has(l.id)) return false;
-      const f = legEndpointRaw(l, 'from'), t = legEndpointRaw(l, 'to');
-      return endpointHitsStop(f, last) && !seq.some(s => endpointHitsStop(t, s));
+      const f = legPlayEndpoint(l, 'from'), t = legPlayEndpoint(l, 'to');
+      if (!f || !t) return false;
+      if (!endpointHitsStop(f, last)) return false;
+      const toHomeOrCustom = l.to && (l.to.kind === 'home' || l.to.kind === 'custom');
+      return !!toHomeOrCustom || !seq.some(s => endpointHitsStop(t, s));
     }) || null;
     if (leg) {
-      const r = legEndpointRaw(leg, 'to');
+      const r = legPlayEndpoint(leg, 'to');
       const B = (r.lat != null && r.lat !== '' && r.lng != null && r.lng !== '') ? [Number(r.lat), Number(r.lng)] : null;
       if (B) {
         used.add(leg.id);
@@ -1567,6 +1608,16 @@ function buildSegments(seq) {
           ms: segDuration(segA, segB, leg.mode),
           zoom: playZoomFor(last, { lat: B[0], lng: B[1] }),
         };
+        console.log('[footprint][play-diag] seg', seq.length, 'outbound', {
+          from: last.nameZh || '', to: endpointName(leg, 'to', '目的地'),
+          legId: leg.id, mode: leg.mode,
+          A: segA, B: segB, rawA: A, rawB: B,
+        });
+      } else {
+        console.log('[footprint][play-diag] seg', seq.length, 'outbound-no-coords', {
+          from: last.nameZh || '', to: endpointName(leg, 'to', '目的地'),
+          legId: leg.id, mode: leg.mode, A: [last.lat, last.lng], B: null,
+        });
       }
     }
   }
@@ -1585,6 +1636,17 @@ function buildSegments(seq) {
       ms: segDuration(A, B, infer),
       zoom: playZoomFor(last, { lat: B[0], lng: B[1] }),
     };
+    console.log('[footprint][play-diag] seg', seq.length, 'synthetic-outbound', {
+      from: last.nameZh || '', to: HOME_CITY.name,
+      legId: null, mode: infer, A, B,
+    });
+  }
+  if (seq.length && !segs[seq.length]) {
+    const last = seq[seq.length - 1];
+    console.log('[footprint][play-diag] seg', seq.length, 'no-outbound', {
+      from: last.nameZh || '', to: null, legId: null, mode: null,
+      A: [last.lat, last.lng], B: null,
+    });
   }
   return segs;
 }
@@ -1775,13 +1837,13 @@ function enterPlayPhase(phase) {
     map.setView(seg.from, st.zoom, { animate: false });   // 段首对齐，段内不再改缩放
     prefetchTilesAlong(seg.pts, st.zoom, 12);
     prefetchArea(seg.to[0], seg.to[1], st.zoom, 1);
-    st.segLine = seg.hasLeg
+    st.segLine = (seg.pts && seg.pts.length > 1)
       ? L.polyline([seg.pts[0]], {
           color: seg.color, weight: 3, opacity: 0.95,
           lineCap: 'round', lineJoin: 'round',
           interactive: false,
         }).addTo(_playGroup)
-      : null;                                       // 无 Leg 的跳跃段：光点移动但不画线
+      : null;                                       // 无坐标才不画线；相邻城市缺 Leg 时也画兜底直线
     st.runner = L.marker(seg.pts[0], {
       icon: L.divIcon({
         className: 'play-runner-icon', iconSize: [16, 16], iconAnchor: [8, 8],
@@ -1972,7 +2034,7 @@ function startPlay(tripId) {
   if (_wishGroup) map.removeLayer(_wishGroup); // 播放视图专注轨迹
   _playGroup = L.layerGroup().addTo(map);
   const speed = parseFloat(document.getElementById('play-speed').value) || 1;
-  const segs = buildSegments(seq);
+  const segs = buildSegments(seq, tripId);
   const { phases, total } = buildTimeline(seq, segs);
   map.options.zoomSnap = 0;                              // 播放期支持连续缩放，收尾恢复
   _prefetched.clear(); _prefetchQueue.length = 0;
@@ -2505,7 +2567,12 @@ async function autoChainLeg(stop) {
     } else if (kind === 'stop') {
       const photoIds = await deleteStopPhotos(id);
       await DB.delStop(id);
-      const lIds = LEGS.filter(l => l.fromStopId === id || l.toStopId === id).map(l => l.id);
+      // 新结构端点在 from.stopId/to.stopId；旧结构在 fromStopId/toStopId，两种都要清
+      const lIds = LEGS.filter(l => {
+        const f = (l.from && l.from.kind === 'stop') ? l.from.stopId : l.fromStopId;
+        const t = (l.to && l.to.kind === 'stop') ? l.to.stopId : l.toStopId;
+        return f === id || t === id;
+      }).map(l => l.id);
       for (const lid of lIds) await DB.delLeg(lid);
       await clearDanglingCovers(photoIds, new Set([id]));
     } else if (kind === 'leg') {
@@ -2939,9 +3006,16 @@ function bindSettings() {
     try {
       const text = await file.text();
       const data = JSON.parse(text);
-      await DB.importAll(data);
+      const skipped = await DB.importAll(data);
       await reload();
-      toast('导入成功');
+      const fixed = skipped ? (skipped.stops + skipped.legs + skipped.diaries + skipped.converted) : 0;
+      if (fixed) {
+        // 详情放在控制台：孤儿行程/城市在云端外键下会导致整批导入失败，这里已自动跳过/降级
+        console.warn('[footprint] 导入时跳过或修正的记录：', skipped.details);
+        toast(`导入成功；已跳过/修正 ${fixed} 条无主旧记录（详情见控制台）`);
+      } else {
+        toast('导入成功');
+      }
     } catch (err) {
       toast('导入失败：' + err.message);
     }
@@ -2952,7 +3026,7 @@ function bindSettings() {
   if (btnSyncUp) btnSyncUp.addEventListener('click', async () => {
     if (!window._sbUser) {
       const av = document.getElementById('btn-avatar');
-      toast('当前页面未检测到登录（头像显示：' + (av ? av.textContent.trim() : '游客') + '）。请在当前页面点头像重新登录；注意 github.io 与 deno.net 是两个独立站点，登录状态不互通');
+      toast('当前页面未检测到登录（头像显示：' + (av ? av.textContent.trim() : '游客') + '）。账号在 github.io 与 deno.net 通用，换站点重新登录即可（不用重新注册），但登录状态不互通');
       return;
     }
     btnSyncUp.disabled = true;
