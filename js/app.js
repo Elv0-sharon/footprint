@@ -2423,7 +2423,7 @@ function bindForms() {
       markerColor: f.markerColor.value || DEFAULT_MARKER_COLOR,
       coverPhotoId: oldStop ? (oldStop.coverPhotoId || '') : '',   // 编辑时保留封面照片
     };
-    if (!stop.tripId || !stop.nameZh) { toast('请选择行程并填写名称'); return; }
+    if (!stop.tripId || !TRIPS.some(t => t.id === stop.tripId) || !stop.nameZh) { toast('请选择有效行程并填写名称'); return; }
     // 编辑时同步点亮集合：改名/改国家清旧记录，同名时同步坐标与省份
     if (oldStop) {
       const oldKey = normCity(oldStop.city) || normCity(oldStop.nameZh);
@@ -2553,32 +2553,40 @@ async function autoChainLeg(stop) {
     if (kind === 'trip' && _editingTripId === id) exitEditMode('trip');
     if (kind === 'stop' && _editingStopId === id) exitEditMode('stop');
     if (kind === 'leg' && _editingLegId === id) exitEditMode('leg');
-    if (kind === 'trip') {
-      await DB.delTrip(id);
-      const sIds = STOPS.filter(s => s.tripId === id).map(s => s.id);
-      const lIds = LEGS.filter(l => l.tripId === id).map(l => l.id);
-      const photoIds = [];
-      for (const sid of sIds) {
-        photoIds.push(...(await deleteStopPhotos(sid)));
-        await DB.delStop(sid);
+    try {
+      if (kind === 'trip') {
+        const sIds = STOPS.filter(s => s.tripId === id).map(s => s.id);
+        const sSet = new Set(sIds);
+        // 先删子表（交通段→照片/城市）再删行程：避免外键阻止删除，也避免中途失败留下悬空城市/交通段
+        const lIds = new Set(LEGS.filter(l => l.tripId === id).map(l => l.id));
+        LEGS.forEach(l => {   // 其它行程里引用了这些城市的段也要清掉
+          if (sIds.some(sid => legRefsStop(l, sid))) lIds.add(l.id);
+        });
+        for (const lid of lIds) await DB.delLeg(lid);
+        const photoIds = [];
+        for (const sid of sIds) {
+          photoIds.push(...(await deleteStopPhotos(sid)));
+          await DB.delStop(sid);
+        }
+        await DB.delTrip(id);
+        await clearDanglingCovers(photoIds, sSet);
+      } else if (kind === 'stop') {
+        // 先删引用该城市的交通段，再删城市；避免中途失败后“城市没了、交通段还在”
+        const lIds = LEGS.filter(l => legRefsStop(l, id)).map(l => l.id);
+        for (const lid of lIds) await DB.delLeg(lid);
+        await DB.delStop(id);
+        const photoIds = await deleteStopPhotos(id);
+        await clearDanglingCovers(photoIds, new Set([id]));
+      } else if (kind === 'leg') {
+        await DB.delLeg(id);
       }
-      for (const lid of lIds) await DB.delLeg(lid);
-      await clearDanglingCovers(photoIds, new Set(sIds));
-    } else if (kind === 'stop') {
-      const photoIds = await deleteStopPhotos(id);
-      await DB.delStop(id);
-      // 新结构端点在 from.stopId/to.stopId；旧结构在 fromStopId/toStopId，两种都要清
-      const lIds = LEGS.filter(l => {
-        const f = (l.from && l.from.kind === 'stop') ? l.from.stopId : l.fromStopId;
-        const t = (l.to && l.to.kind === 'stop') ? l.to.stopId : l.toStopId;
-        return f === id || t === id;
-      }).map(l => l.id);
-      for (const lid of lIds) await DB.delLeg(lid);
-      await clearDanglingCovers(photoIds, new Set([id]));
-    } else if (kind === 'leg') {
-      await DB.delLeg(id);
+      await reload();
+      toast('已删除');
+    } catch (err) {
+      console.error('[footprint] 删除失败：', err);
+      toast('删除失败：' + ((err && (err.message || err.code)) || err));
+      try { await reload(); } catch (e2) { /* 重新载入以显示真实状态 */ }
     }
-    await reload(); toast('已删除');
   });
 
   // 心情日记
@@ -2964,8 +2972,59 @@ async function renderStats() {
     ? `⚠️ 距上次导出已超过 30 天，建议导出 JSON 备份，防止清缓存丢失`
     : '⚠️ 建议导出 JSON 备份，防止清缓存丢失';
 }
+/* ===== 数据自检：城市被编辑到错误行程后，会“混入”别的行程时间线 =====
+   判定依据：引用该城市的交通段属于哪个行程。只有一个行程引用时才自动归位；
+   多个行程都引用或没有交通段时不猜，交给用户手动处理。 */
+function legRefsStop(l, stopId) {
+  const f = (l.from && l.from.kind === 'stop') ? l.from.stopId : l.fromStopId;
+  const t = (l.to && l.to.kind === 'stop') ? l.to.stopId : l.toStopId;
+  return f === stopId || t === stopId;
+}
+function tripContainsDate(t, date) {
+  if (!t || !date) return false;
+  if (t.dateStart && date < t.dateStart) return false;
+  if (t.dateEnd && date > t.dateEnd) return false;
+  return !!(t.dateStart || t.dateEnd);
+}
+function findMisassignedStops() {
+  const fixes = [];
+  for (const s of STOPS) {
+    const refs = LEGS.filter(l => legRefsStop(l, s.id));
+    const tripIds = [...new Set(refs.map(l => l.tripId).filter(id => id && TRIPS.some(t => t.id === id)))];
+    let targetId = null, basis = '';
+    if (tripIds.length === 1) {
+      targetId = tripIds[0]; basis = '交通段';
+    } else if (tripIds.length === 0) {
+      // 没有交通段可依据时，退回用到达/离开日期：恰好落入一个行程的日期范围才归位
+      const date = s.arriveDate || s.leaveDate;
+      const byDate = TRIPS.filter(t => tripContainsDate(t, date));
+      if (byDate.length === 1) { targetId = byDate[0].id; basis = '日期'; }
+    }
+    if (!targetId || targetId === s.tripId) continue;
+    const from = TRIPS.find(t => t.id === s.tripId);
+    const to = TRIPS.find(t => t.id === targetId);
+    fixes.push({ stop: s, targetId, basis, fromTitle: from ? from.title : '（无/已删除行程）', toTitle: to.title });
+  }
+  return fixes;
+}
+async function repairMisassignedStops() {
+  const fixes = findMisassignedStops();
+  if (!fixes.length) { toast('未发现错位城市（城市所属行程与交通段一致）'); return; }
+  const lines = fixes.map(f => `「${f.stop.nameZh}」：${f.fromTitle} → ${f.toTitle}（依据：${f.basis}）`).join('\n');
+  if (!confirm(`发现 ${fixes.length} 个城市的所属行程与交通段不一致。\n\n${lines}\n\n城市不会删除，只会归位到交通段所在行程。继续？`)) return;
+  let ok = 0, fail = 0;
+  for (const f of fixes) {
+    try { await DB.putStop({ ...f.stop, tripId: f.targetId }); ok++; }
+    catch (e) { console.warn('[footprint] 城市归位失败：', f.stop.id, e); fail++; }
+  }
+  await reload();
+  toast(`已归位 ${ok} 个城市` + (fail ? `，失败 ${fail} 个，可再试一次` : ''));
+}
+
 function bindSettings() {
   renderStats();
+  const btnRepair = document.getElementById('btn-repair');
+  if (btnRepair) btnRepair.addEventListener('click', repairMisassignedStops);
   // 常驻城市：改名/改坐标后保存，Leg 下拉与连线随 reload 同步更新
   const hf = document.getElementById('form-home-city');
   if (hf) {
