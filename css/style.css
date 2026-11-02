@@ -344,7 +344,9 @@ button.small.ghost:hover { background: var(--btn-hover); }
 /* 站点照片 */
 .photo-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
 .photo-toolbar .hint { font-size: 12px; }
+.file-btn.disabled { opacity: .55; pointer-events: none; }
 .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+.photo-grid.drop-active { outline: 2px dashed var(--accent); outline-offset: 6px; border-radius: 8px; }
 .photo-cell { margin: 0; }
 .photo-thumb {
   width: 100%; aspect-ratio: 1; object-fit: cover;

@@ -353,10 +353,11 @@
     <div class="drawer-head"><h2 id="photo-drawer-title">📷 城市照片</h2><button id="photos-close" class="drawer-close" title="关闭照片抽屉" aria-label="关闭照片抽屉">✕</button></div>
     <div class="drawer-body">
       <div class="photo-toolbar">
-        <label class="file-btn primary">添加照片
+        <label class="file-btn primary">添加照片（可多选 / 拖入）
           <input type="file" id="photo-input" accept="image/*" multiple hidden>
         </label>
-        <span class="hint">自动压缩：长边 1600px / JPEG 0.8，登录后同步云端</span>
+        <span class="hint">可一次选择多张；自动压缩：长边 1600px / JPEG 0.8，登录后同步云端</span>
+        <span class="hint" id="photo-progress"></span>
         <span class="hint" id="photo-count"></span>
       </div>
       <div id="photo-empty" class="empty" hidden>该城市还没有照片</div>

@@ -3051,28 +3051,29 @@ function photoCount(stopId) { return _photoIndex.filter(p => p.stopId === stopId
 async function loadPhotoIndex() { _photoIndex = await DB.getPhotoIndex(); }
 
 // canvas 压缩：长边 1600px，JPEG 0.8，输出 Blob
+// 用 Object URL 而非 DataURL，省去 base64 编解码，批量压缩更快更省内存
 function compressImage(file) {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        try {
-          const MAX = 1600;
-          const scale = Math.min(1, MAX / Math.max(img.width, img.height));
-          const w = Math.max(1, Math.round(img.width * scale));
-          const h = Math.max(1, Math.round(img.height * scale));
-          const canvas = document.createElement('canvas');
-          canvas.width = w; canvas.height = h;
-          canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-          canvas.toBlob(b => b ? resolve(b) : reject(new Error('canvas 导出失败')), 'image/jpeg', 0.8);
-        } catch (err) { reject(err); }
-      };
-      img.onerror = () => reject(new Error('无法解码图片'));
-      img.src = reader.result;
+    const url = URL.createObjectURL(file);
+    const cleanup = () => URL.revokeObjectURL(url);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const MAX = 1600;
+        const scale = Math.min(1, MAX / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        canvas.toBlob(b => {
+          cleanup();
+          b ? resolve(b) : reject(new Error('canvas 导出失败'));
+        }, 'image/jpeg', 0.8);
+      } catch (err) { cleanup(); reject(err); }
     };
-    reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
-    reader.readAsDataURL(file);
+    img.onerror = () => { cleanup(); reject(new Error('无法解码图片')); };
+    img.src = url;
   });
 }
 
@@ -3204,26 +3205,52 @@ function pcGo(delta) {
   renderCarousel(delta);
 }
 
-function bindPhotos() {
-  // 多选上传
-  document.getElementById('photo-input').addEventListener('change', async (e) => {
-    const files = [...e.target.files];
-    e.target.value = '';
-    if (!files.length || !_photoStopId) return;
-    // 单城市照片上限 30 张：已达上限不追加，超出部分截断并提示
-    const used = photoCount(_photoStopId);
-    const remain = PHOTO_LIMIT - used;
-    if (remain <= 0) { toast('该城市照片已达上限'); return; }
-    const willUpload = files.slice(0, remain);
-    let ok = 0, fail = 0;
-    for (const f of willUpload) {
-      if (!f.type || !f.type.startsWith('image/')) { fail++; continue; }
+let _photoUploading = false;
+
+// 批量添加照片：多选 / 拖拽都走这里，最多 3 张并发压缩入库
+async function addPhotoFiles(fileList) {
+  if (!_photoStopId) return;
+  const all = [...(fileList || [])];
+  if (!all.length) return;
+  if (_photoUploading) { toast('正在添加照片，请稍候'); return; }
+  const images = all.filter(f => f.type && f.type.startsWith('image/'));
+  if (!images.length) { toast('未选择图片文件'); return; }
+  // 单城市照片上限 30 张：已达上限不追加，超出部分截断并提示
+  const jobStopId = _photoStopId;
+  const used = photoCount(jobStopId);
+  const remain = PHOTO_LIMIT - used;
+  if (remain <= 0) { toast('该城市照片已达上限'); return; }
+  const willUpload = images.slice(0, remain);
+  const overCut = images.length - willUpload.length;
+  const total = willUpload.length;
+
+  _photoUploading = true;
+  const inputEl = document.getElementById('photo-input');
+  const progressEl = document.getElementById('photo-progress');
+  const fileBtn = inputEl && inputEl.closest('.file-btn');
+  if (inputEl) inputEl.disabled = true;
+  if (fileBtn) fileBtn.classList.add('disabled');
+
+  let ok = 0, fail = 0, done = 0;
+  const updateProgress = () => {
+    if (progressEl) progressEl.textContent = done < total ? `正在添加 ${done}/${total}…` : '';
+  };
+  updateProgress();
+
+  const CONCURRENCY = 3;
+  const baseTs = Date.now();
+  let cursor = 0;
+  async function worker() {
+    while (cursor < willUpload.length) {
+      const idx = cursor++;
+      const f = willUpload[idx];
       try {
         const blob = await compressImage(f);
         const rec = {
-          id: uid(), stopId: _photoStopId, blob,
+          id: uid(), stopId: jobStopId, blob,
           caption: '', shootDate: new Date().toISOString().slice(0, 10), author: '',
-          createdAt: new Date().toISOString(),
+          // 并发完成顺序不可控，按加入批次时的选择顺序写入，保证相册顺序与所选一致
+          createdAt: new Date(baseTs + idx).toISOString(),
         };
         await DB.putPhoto(rec);
         if (window._sbUser) window.mirrorPhoto(rec, blob);   // 登录时镜像到云端（含文件）
@@ -3232,14 +3259,58 @@ function bindPhotos() {
         console.error('[footprint] 照片压缩/入库失败：', f.name, err);
         fail++;
       }
+      done++;
+      updateProgress();
     }
-    await loadPhotoIndex();
-    await refreshCoverUrls();
-    await renderPhotoGrid();
-    renderMap();  // 避免弹窗计数过期，并同步封面气泡
-    const overCut = files.length > willUpload.length ? `，超出上限的 ${files.length - willUpload.length} 张未接收` : '';
-    toast(`已添加 ${ok} 张照片` + (fail ? `，${fail} 张失败` : '') + overCut);
+  }
+  try {
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
+  } finally {
+    _photoUploading = false;
+    if (inputEl) inputEl.disabled = false;
+    if (fileBtn) fileBtn.classList.remove('disabled');
+    if (progressEl) progressEl.textContent = '';
+  }
+
+  await loadPhotoIndex();
+  await refreshCoverUrls();
+  if (_photoStopId === jobStopId) await renderPhotoGrid();
+  renderMap();  // 避免弹窗计数过期，并同步封面气泡
+  toast(`已添加 ${ok} 张照片` + (fail ? `，${fail} 张失败` : '') +
+    (overCut ? `，超出上限的 ${overCut} 张未接收` : ''));
+}
+
+function bindPhotos() {
+  // 多选上传
+  document.getElementById('photo-input').addEventListener('change', (e) => {
+    const files = [...e.target.files];
+    e.target.value = '';
+    addPhotoFiles(files);
   });
+
+  // 拖拽多张照片到照片面板即可追加
+  const photoBody = document.querySelector('#drawer-photos .drawer-body');
+  const photoGrid = document.getElementById('photo-grid');
+  if (photoBody) {
+    const hasFiles = (e) => [...((e.dataTransfer && e.dataTransfer.types) || [])].includes('Files');
+    photoBody.addEventListener('dragenter', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault(); photoGrid.classList.add('drop-active');
+    });
+    photoBody.addEventListener('dragover', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+    });
+    photoBody.addEventListener('dragleave', (e) => {
+      if (photoBody.contains(e.relatedTarget)) return;
+      photoGrid.classList.remove('drop-active');
+    });
+    photoBody.addEventListener('drop', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault(); photoGrid.classList.remove('drop-active');
+      addPhotoFiles(e.dataTransfer.files);
+    });
+  }
 
   // 列表里的"管理照片"入口（弹窗内入口由 popupopen 单独绑定）
   document.addEventListener('click', (e) => {
