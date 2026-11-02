@@ -268,20 +268,23 @@ const DB = {
     await _clear('photos');
   },
 
-  // JSON 导出只含文字数据，不含照片 Blob
-  exportAll: async () => ({
-    app: 'footprint',
-    version: 3,
-    exportedAt: new Date().toISOString(),
-    trips: await _getAll('trips'),
-    stops: await _getAll('stops'),
-    legs:  await _getAll('legs'),
-    visitedProvinces: (await _getAll('visitedProvinces')).map(r => r.name),
-    visitedCities: await _getAll('visitedCities'),
-    diaries: await _getAll('diaries'),
-    homeCity: (await _getAll('config')).find(r => r.key === 'homeCity') || null,
-    wishlist: await _getAll('wishlist'),
-  }),
+  // JSON 导出只含文字数据，不含照片 Blob，也不带内部的 _localOnly 同步标记
+  exportAll: async () => {
+    const strip = r => { const c = { ...r }; delete c._localOnly; return c; };
+    return {
+      app: 'footprint',
+      version: 3,
+      exportedAt: new Date().toISOString(),
+      trips: (await _getAll('trips')).map(strip),
+      stops: (await _getAll('stops')).map(strip),
+      legs:  (await _getAll('legs')).map(strip),
+      visitedProvinces: (await _getAll('visitedProvinces')).map(r => r.name),
+      visitedCities: await _getAll('visitedCities'),
+      diaries: (await _getAll('diaries')).map(strip),
+      homeCity: (await _getAll('config')).find(r => r.key === 'homeCity') || null,
+      wishlist: (await _getAll('wishlist')).map(strip),
+    };
+  },
 
   importAll: async (data) => {
     if (!data || !Array.isArray(data.trips) || !Array.isArray(data.stops) || !Array.isArray(data.legs)) {
@@ -294,8 +297,11 @@ const DB = {
     const cloud = _cloudOn();
     if (cloud) await SBCloud.importAll(clean);
     await _clear('trips'); await _clear('stops'); await _clear('legs'); await _clear('diaries'); await _clear('wishlist');
-    // 游客态导入的数据标记为待合并，登录后由 mergeLocalToCloud 上传
-    const mark = r => cloud ? r : { ...r, _localOnly: true };
+    // 游客态导入的数据标记为待合并，登录后由 mergeLocalToCloud 上传；登录态导入直接视为已同步
+    const mark = r => {
+      const c = { ...r }; delete c._localOnly;
+      return cloud ? c : { ...c, _localOnly: true };
+    };
     for (const t of clean.trips) await _put('trips', mark(t));
     for (const s of clean.stops) await _put('stops', mark(s));
     for (const l of clean.legs) await _put('legs', mark(l));
