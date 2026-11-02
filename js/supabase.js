@@ -222,7 +222,10 @@ window.unmirrorPhoto = async function (id) {
 };
 
 // 登录合并：把本机数据整体回写云端（同 id upsert 覆盖），本机后来的修改也能同步出去
-window.mergeLocalToCloud = async function () {
+// force=true：设置里的“上传本机数据到云端”，强制上传全部本机记录（用于云端被清空后的恢复）。
+// 默认只合并游客期间新增、尚未同步的记录；本机缓存里的其他行可能已在另一台设备删除，
+// 无条件 upsert 会把它们“复活”成云端残留（表现为删不干净的交通段/城市）。
+window.mergeLocalToCloud = async function (force = false) {
   if (!sb || !_sbUser || !DB.getLocalAll) return { up: 0, fail: 0, errors: [] };
   const local = await DB.getLocalAll();
   const plan = [
@@ -233,9 +236,12 @@ window.mergeLocalToCloud = async function () {
   const errors = [];
   for (const [table, put] of plan) {          // 顺序 trips→stops→legs 满足外键依赖
     for (const item of (local[table] || [])) {
-      if (!item || !item.id) continue;        // 本机每条都 upsert，云端同 id 的旧内容会被覆盖
-      try { await put(item); up++; }
-      catch (e) {
+      if (!item || !item.id || (!force && !item._localOnly)) continue;
+      const clean = { ...item }; delete clean._localOnly;
+      try {
+        await put(clean); up++;
+        if (item._localOnly) await DB.markSynced(table, item.id);   // 已同步，下次不再自动上传
+      } catch (e) {
         console.warn('[footprint] 合并上传失败：', table, item.id, e);
         errors.push(`${table} ${item.id}：${(e && (e.message || e.code)) || e}`);
         fail++;

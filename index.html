@@ -286,9 +286,10 @@
           </label>
           <button id="btn-sync-up">⬆️ 上传本机数据到云端</button>
           <button id="btn-repair">🩹 修复错位城市（按交通段归位）</button>
+          <button id="btn-clean-legs">🧹 清理无主交通段（行程/城市已删除）</button>
           <button id="btn-clear" class="danger">清空全部数据</button>
         </div>
-        <p class="hint">清空操作需二次确认，导入将覆盖现有数据。若某个城市混进了别的行程时间线（所属行程被改错），点「修复错位城市」会按交通段自动归位。</p>
+        <p class="hint">清空操作需二次确认，导入将覆盖现有数据。若某个城市混进了别的行程时间线（所属行程被改错），点「修复错位城市」会按交通段自动归位。删行程/城市后如果还剩一条无主的交通线，点「清理无主交通段」即可。</p>
         <p class="hint">地图操作：左键拖拽平移；键盘 W/A/S/D 或方向键平移；双击省份进入省内地图。</p>
       </div>
     </div>
@@ -356,9 +357,16 @@
         <label class="file-btn primary">添加照片（可多选 / 拖入）
           <input type="file" id="photo-input" accept="image/*" multiple hidden>
         </label>
+        <button type="button" id="photo-select-toggle" class="ghost">☑️ 选择删除</button>
         <span class="hint">可一次选择多张；自动压缩：长边 1600px / JPEG 0.8，登录后同步云端</span>
         <span class="hint" id="photo-progress"></span>
         <span class="hint" id="photo-count"></span>
+      </div>
+      <div id="photo-select-bar" class="photo-select-bar" hidden>
+        <button type="button" id="photo-select-all" class="small ghost">全选</button>
+        <span class="hint" id="photo-select-count">已选 0 张</span>
+        <button type="button" id="photo-delete-selected" class="small" disabled>删除选中</button>
+        <button type="button" id="photo-select-cancel" class="small ghost">取消</button>
       </div>
       <div id="photo-empty" class="empty" hidden>该城市还没有照片</div>
       <div id="photo-grid" class="photo-grid"></div>

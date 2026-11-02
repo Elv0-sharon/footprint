@@ -18,6 +18,8 @@ let _timelineOrders = {}; // tripId -> 手动拖动后的时间线条目顺序�
 let _photoStopId = null, _stopPhotos = [], _thumbUrls = [];
 let _photoIndex = [];   // 轻量索引 [{id, stopId}]，用于弹窗计数
 let _lbPhotoId = null, _lbUrl = null;
+let _photoSelectMode = false;   // 照片抽屉：批量选择删除模式
+let _photoSelected = new Set(); // 已勾选的照片 id
 
 /* 封面气泡 & 轮播状态 */
 let _stopMarkers = new Map();   // stopId -> Leaflet marker（用于原位改色）
@@ -1255,7 +1257,9 @@ function tripGroupHtml(trip, stops, legs) {
   const actions = trip
     ? `<span class="tg-actions"><button class="small ghost" data-edit="trip" data-id="${trip.id}">编辑</button>`
       + `<button class="small" data-del="trip" data-id="${trip.id}">删除</button></span>`
-    : '';
+    : (legs.length
+      ? `<span class="tg-actions"><button class="small ghost" data-clean-orphan-legs="1">🧹 清理无主交通段</button></span>`
+      : '');
   const sortedStops = stops.slice().sort((a, b) =>
     (a.arriveDate || a.leaveDate || '9999').localeCompare(b.arriveDate || b.leaveDate || '9999')
     || String(a.id).localeCompare(String(b.id)));
@@ -2478,6 +2482,9 @@ function closeDrawer(name) {
     if (grid) grid.innerHTML = '';
     if (emptyEl) emptyEl.hidden = true;
     _photoStopId = null;
+    _photoSelectMode = false;
+    _photoSelected.clear();
+    updatePhotoSelectBar();
   }
   if (_openDrawer === name) _openDrawer = null;
 }
@@ -2936,6 +2943,7 @@ async function autoChainLeg(stop) {
 
   // 已有数据删除（事件委托）
   document.getElementById('data-lists').addEventListener('click', async (e) => {
+    if (e.target.closest('[data-clean-orphan-legs]')) { cleanOrphanLegs(); return; }
     const btn = e.target.closest('[data-del]');
     if (!btn) return;
     const kind = btn.dataset.del, id = btn.dataset.id;
@@ -3082,6 +3090,8 @@ function openPhotoDrawer(stopId) {
   if (!stop) { toast('城市不存在'); return; }
   openDrawer('photos');            // 统一状态管理：先 closeAllDrawers 再开自己
   _photoStopId = stopId;
+  _photoSelectMode = false;
+  _photoSelected.clear();
   document.getElementById('photo-drawer-title').textContent = '📷 ' + stopVisitLabel(stop);
   renderPhotoGrid();
 }
@@ -3093,13 +3103,82 @@ async function renderPhotoGrid() {
   _thumbUrls.forEach(u => URL.revokeObjectURL(u)); _thumbUrls = [];
   _stopPhotos = await DB.getPhotosByStop(_photoStopId);
   _stopPhotos.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+  // 已删除的照片不再保留勾选
+  const alive = new Set(_stopPhotos.map(p => p.id));
+  [..._photoSelected].forEach(id => { if (!alive.has(id)) _photoSelected.delete(id); });
   emptyEl.hidden = _stopPhotos.length > 0;
   const cnt = document.getElementById('photo-count');
   if (cnt) cnt.textContent = `${_stopPhotos.length}/${PHOTO_LIMIT}`;
   grid.innerHTML = _stopPhotos.map(p => {
     const url = URL.createObjectURL(p.blob); _thumbUrls.push(url);
-    return `<figure class="photo-cell"><img class="photo-thumb" src="${url}" data-photo-view="${p.id}" alt="${esc(p.caption || '照片')}"></figure>`;
+    const sel = _photoSelected.has(p.id);
+    return `<figure class="photo-cell${_photoSelectMode ? ' selectable' : ''}${sel ? ' selected' : ''}" data-photo-cell="${esc(p.id)}">`
+      + `<img class="photo-thumb" src="${url}" data-photo-view="${esc(p.id)}" alt="${esc(p.caption || '照片')}">`
+      + (_photoSelectMode ? `<span class="photo-check">${sel ? '✓' : ''}</span>` : '')
+      + `</figure>`;
   }).join('');
+  updatePhotoSelectBar();
+}
+
+/* ---- 照片批量选择删除 ---- */
+function updatePhotoSelectBar() {
+  const bar = document.getElementById('photo-select-bar');
+  const toggle = document.getElementById('photo-select-toggle');
+  if (bar) bar.hidden = !_photoSelectMode;
+  if (toggle) {
+    toggle.textContent = _photoSelectMode ? '✖ 退出选择' : '☑️ 选择删除';
+    toggle.classList.toggle('active', _photoSelectMode);
+  }
+  const cnt = document.getElementById('photo-select-count');
+  if (cnt) cnt.textContent = `已选 ${_photoSelected.size} 张`;
+  const del = document.getElementById('photo-delete-selected');
+  if (del) {
+    del.disabled = _photoSelected.size === 0;
+    del.textContent = _photoSelected.size ? `删除选中（${_photoSelected.size}）` : '删除选中';
+  }
+  const all = document.getElementById('photo-select-all');
+  if (all) all.textContent = (_stopPhotos.length && _photoSelected.size === _stopPhotos.length) ? '取消全选' : '全选';
+}
+function setPhotoSelectMode(on) {
+  _photoSelectMode = !!on;
+  if (!_photoSelectMode) _photoSelected.clear();
+  updatePhotoSelectBar();
+  renderPhotoGrid();
+}
+function togglePhotoSelection(id) {
+  if (_photoSelected.has(id)) _photoSelected.delete(id);
+  else _photoSelected.add(id);
+  updatePhotoSelectBar();
+  const cell = [...document.querySelectorAll('#photo-grid [data-photo-cell]')]
+    .find(el => el.dataset.photoCell === id);
+  if (cell) {
+    cell.classList.toggle('selected', _photoSelected.has(id));
+    const check = cell.querySelector('.photo-check');
+    if (check) check.textContent = _photoSelected.has(id) ? '✓' : '';
+  }
+}
+function toggleSelectAllPhotos() {
+  if (_stopPhotos.length && _photoSelected.size === _stopPhotos.length) _photoSelected.clear();
+  else _stopPhotos.forEach(p => _photoSelected.add(p.id));
+  updatePhotoSelectBar();
+  renderPhotoGrid();
+}
+// 删除若干张照片：本机 + 云端文件/元数据；若被删的是封面则一并清掉引用
+async function deletePhotosByIds(ids) {
+  const set = new Set(ids);
+  const list = _stopPhotos.filter(p => set.has(p.id));
+  for (const p of list) {
+    await DB.delPhoto(p.id);
+    if (window.unmirrorPhoto) await window.unmirrorPhoto(p.id);
+    const coverStop = STOPS.find(s => s.coverPhotoId === p.id);
+    if (coverStop) { coverStop.coverPhotoId = ''; await DB.putStop(coverStop); }
+  }
+  _stopPhotos = _stopPhotos.filter(p => !set.has(p.id));
+  [..._photoSelected].forEach(id => { if (set.has(id)) _photoSelected.delete(id); });
+  await loadPhotoIndex();
+  await refreshCoverUrls();
+  renderMap();
+  return list.length;
 }
 
 function openLightbox(photoId) {
@@ -3318,10 +3397,31 @@ function bindPhotos() {
     if (btn) openPhotoDrawer(btn.dataset.photos);
   });
 
-  // 缩略图 → 大图
+  // 缩略图 → 大图；批量选择模式下改为勾选/取消
   document.getElementById('photo-grid').addEventListener('click', (e) => {
+    const cell = e.target.closest('[data-photo-cell]');
+    if (!cell) return;
+    if (_photoSelectMode) { togglePhotoSelection(cell.dataset.photoCell); return; }
     const img = e.target.closest('[data-photo-view]');
     if (img) openLightbox(img.dataset.photoView);
+  });
+
+  // 批量选择删除
+  const selToggle = document.getElementById('photo-select-toggle');
+  if (selToggle) selToggle.addEventListener('click', () => setPhotoSelectMode(!_photoSelectMode));
+  const selAll = document.getElementById('photo-select-all');
+  if (selAll) selAll.addEventListener('click', toggleSelectAllPhotos);
+  const selCancel = document.getElementById('photo-select-cancel');
+  if (selCancel) selCancel.addEventListener('click', () => setPhotoSelectMode(false));
+  const selDel = document.getElementById('photo-delete-selected');
+  if (selDel) selDel.addEventListener('click', async () => {
+    const n = _photoSelected.size;
+    if (!n) return;
+    if (!confirm(`确定删除选中的 ${n} 张照片？删除后不可恢复。`)) return;
+    const count = await deletePhotosByIds([..._photoSelected]);
+    if (!_stopPhotos.length) _photoSelectMode = false;
+    await renderPhotoGrid();
+    toast(`已删除 ${count} 张照片`);
   });
 
   // 灯箱关闭：✕ 由上方 .drawer-close 委托统一处理，这里只处理点遮罩关闭
@@ -3370,16 +3470,9 @@ function bindPhotos() {
     const p = _stopPhotos.find(x => x.id === _lbPhotoId);
     if (!p) return;
     if (!confirm('确定删除这张照片？删除后不可恢复。')) return;
-    await DB.delPhoto(p.id);
-    window.unmirrorPhoto(p.id);   // 登录时一并删除云端文件与元数据
-    _stopPhotos = _stopPhotos.filter(x => x.id !== p.id);
-    const coverStop = STOPS.find(x => x.coverPhotoId === p.id);
-    if (coverStop) { coverStop.coverPhotoId = ''; await DB.putStop(coverStop); }
-    await loadPhotoIndex();
-    await refreshCoverUrls();
     closeLightbox();
+    await deletePhotosByIds([p.id]);
     await renderPhotoGrid();
-    renderMap();
     toast('照片已删除');
   });
 
@@ -3442,6 +3535,45 @@ function legRefsStop(l, stopId) {
   const t = (l.to && l.to.kind === 'stop') ? l.to.stopId : l.toStopId;
   return f === stopId || t === stopId;
 }
+/* 无主交通段：所属行程已删除，或起止城市指向已不存在的 Stop。
+   这类记录不会再画在地图上（缺端点坐标时会跳过），也不会随“删城市/删行程”被级联，
+   因为它的父记录早已不在了；用一个显式清理入口把它们删掉。 */
+function isOrphanLeg(l) {
+  if (!l) return false;
+  if (!l.tripId || !TRIPS.some(t => t.id === l.tripId)) return true;
+  for (const end of ['from', 'to']) {
+    const e = l[end];
+    const sid = (e && (e.kind === 'stop' || !e.kind)) ? (e.stopId || l[end + 'StopId']) : l[end + 'StopId'];
+    if (sid && !STOPS.some(s => s.id === sid)) return true;
+  }
+  return false;
+}
+function findOrphanLegs() { return LEGS.filter(isOrphanLeg); }
+async function cleanOrphanLegs() {
+  const orphans = findOrphanLegs();
+  if (!orphans.length) { toast('没有发现无主交通段（所属行程/城市都还在）'); return; }
+  const lines = orphans.slice(0, 10).map(l => {
+    const st = legStyle(l.mode);
+    const from = legEndpointLabel(l, 'from') || '?';
+    const to = legEndpointLabel(l, 'to') || '?';
+    const reasons = [];
+    if (!l.tripId || !TRIPS.some(t => t.id === l.tripId)) reasons.push('行程已删除');
+    for (const end of ['from', 'to']) {
+      const e = l[end];
+      const sid = (e && (e.kind === 'stop' || !e.kind)) ? (e.stopId || l[end + 'StopId']) : l[end + 'StopId'];
+      if (sid && !STOPS.some(s => s.id === sid)) reasons.push((end === 'from' ? '出发' : '到达') + '城市已删除');
+    }
+    return `• ${st.icon} ${from} → ${to}（${reasons.join('、') || '无主'}）`;
+  }).join('\n');
+  if (!confirm(`发现 ${orphans.length} 条无主交通段：\n\n${lines}${orphans.length > 10 ? '\n…' : ''}\n\n这些记录不会再被级联删除，清理后不可恢复。确定删除？`)) return;
+  let ok = 0, fail = 0;
+  for (const l of orphans) {
+    try { await DB.delLeg(l.id); ok++; }
+    catch (e) { fail++; console.warn('[footprint] 清理无主交通段失败：', l.id, e); }
+  }
+  await reload();
+  toast(`已清理 ${ok} 条无主交通段` + (fail ? `，${fail} 条失败，可再试一次` : ''));
+}
 function tripContainsDate(t, date) {
   if (!t || !date) return false;
   if (t.dateStart && date < t.dateStart) return false;
@@ -3487,6 +3619,8 @@ function bindSettings() {
   renderStats();
   const btnRepair = document.getElementById('btn-repair');
   if (btnRepair) btnRepair.addEventListener('click', repairMisassignedStops);
+  const btnCleanLegs = document.getElementById('btn-clean-legs');
+  if (btnCleanLegs) btnCleanLegs.addEventListener('click', cleanOrphanLegs);
   // 常驻城市：改名/改坐标后保存，Leg 下拉与连线随 reload 同步更新
   const hf = document.getElementById('form-home-city');
   if (hf) {
@@ -3553,7 +3687,7 @@ function bindSettings() {
     btnSyncUp.disabled = true;
     const old = btnSyncUp.textContent; btnSyncUp.textContent = '上传中…';
     try {
-      const m = await window.mergeLocalToCloud();
+      const m = await window.mergeLocalToCloud(true);   // 手动上传：强制把本机全部记录推回云端
       const errs = (m.errors || []).slice(0, 2).join('；');
       if (m.up) {
         await reload();
@@ -3604,7 +3738,7 @@ function bindSettings() {
   };
   await window._authReady;          // supabase.js：会话恢复完成（游客不等待登录）
   await window.startApp();
-  if (window._sbUser) {   // 启动时已登录：自动执行一次本机→云端迁移（幂等，云端同 id 跳过）
+  if (window._sbUser) {   // 启动时已登录：只补传游客期间新增、尚未同步的记录（不覆盖云端已有/已删数据）
     window.mergeLocalToCloud().then(async m => {
       if (m.up) await reload();   // 有新增才刷新
       const errs = (m.errors || []).slice(0, 2).join('；');

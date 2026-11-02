@@ -344,16 +344,33 @@ button.small.ghost:hover { background: var(--btn-hover); }
 /* 站点照片 */
 .photo-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
 .photo-toolbar .hint { font-size: 12px; }
+.photo-select-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: -4px 0 12px; padding: 8px 10px; border-radius: 8px;
+  background: var(--btn-bg); border: 1px solid var(--btn-border);
+}
+.photo-select-bar[hidden] { display: none; }
+.photo-select-bar .hint { font-size: 12px; }
+.photo-select-bar button:disabled { opacity: .5; cursor: not-allowed; }
 .file-btn.disabled { opacity: .55; pointer-events: none; }
 .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
 .photo-grid.drop-active { outline: 2px dashed var(--accent); outline-offset: 6px; border-radius: 8px; }
-.photo-cell { margin: 0; }
+.photo-cell { margin: 0; position: relative; }
 .photo-thumb {
   width: 100%; aspect-ratio: 1; object-fit: cover;
   border-radius: 8px; cursor: pointer; display: block;
   border: 1px solid var(--border); background: var(--thumb-bg);
 }
 .photo-thumb:hover { border-color: var(--accent); }
+.photo-cell.selected .photo-thumb { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent); }
+.photo-check {
+  position: absolute; top: 6px; right: 6px; width: 22px; height: 22px;
+  border-radius: 50%; border: 2px solid rgba(255,255,255,.95);
+  background: rgba(0,0,0,.35); color: #fff; font-size: 13px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+.photo-cell.selected .photo-check { background: var(--accent); border-color: var(--accent); }
 .link-btn {
   display: inline-block; margin-top: 6px;
   background: var(--accent); color: var(--on-accent); border: none; border-radius: 6px;

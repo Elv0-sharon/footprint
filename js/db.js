@@ -79,9 +79,11 @@ async function readCloudOrLocal(store, cloudFn) {
     return _getAll(store);
   }
 }
-// 登录态：先写/删云端，成功后再同步本机 IndexedDB 作为缓存；游客态只操作本机
+// 登录态：先写/删云端，成功后再同步本机 IndexedDB 作为缓存；游客态只操作本机。
+// 游客期间写入的记录带 _localOnly 标记：登录时只合并这些记录，避免把本机旧缓存里
+// 已在另一台设备删除的数据重新传回云端（否则会出现“删了又回来”的残留）。
 async function putCloudAndLocal(store, cloudFn, item) {
-  if (!_cloudOn()) return _put(store, item);
+  if (!_cloudOn()) return _put(store, { ...item, _localOnly: true });
   let result;
   try { result = await cloudFn(item); }
   catch (e) {
@@ -239,6 +241,18 @@ const DB = {
     trips: await _getAll('trips'), stops: await _getAll('stops'), legs: await _getAll('legs'),
     diaries: await _getAll('diaries'), wishlist: await _getAll('wishlist'),
   }),
+  // 合并成功后清掉 _localOnly 标记，避免下次登录/启动再次上传同一条
+  markSynced: async (store, id) => {
+    const db = await openDB();
+    const rec = await new Promise((resolve, reject) => {
+      const req = db.transaction(store, 'readonly').objectStore(store).get(id);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+    if (!rec || !rec._localOnly) return;
+    delete rec._localOnly;
+    await _put(store, rec);
+  },
 
   // 用户主动"清空全部数据"：连照片一起清；登录状态同时清空云端，防止刷新/重登后被同步回来
   clearAll: async () => {
@@ -277,13 +291,16 @@ const DB = {
     const { data: clean, skipped } = sanitizeImportData(data);
     // 五类数据：登录时先覆盖云端当前账号（失败会抛出，本机数据此时还没动）；
     // 成功后把导入内容同步写回本机五表，作为离线缓存。
-    if (_cloudOn()) await SBCloud.importAll(clean);
+    const cloud = _cloudOn();
+    if (cloud) await SBCloud.importAll(clean);
     await _clear('trips'); await _clear('stops'); await _clear('legs'); await _clear('diaries'); await _clear('wishlist');
-    for (const t of clean.trips) await _put('trips', t);
-    for (const s of clean.stops) await _put('stops', s);
-    for (const l of clean.legs) await _put('legs', l);
-    for (const d of clean.diaries) await _put('diaries', d);
-    for (const w of (clean.wishlist || [])) await _put('wishlist', w);
+    // 游客态导入的数据标记为待合并，登录后由 mergeLocalToCloud 上传
+    const mark = r => cloud ? r : { ...r, _localOnly: true };
+    for (const t of clean.trips) await _put('trips', mark(t));
+    for (const s of clean.stops) await _put('stops', mark(s));
+    for (const l of clean.legs) await _put('legs', mark(l));
+    for (const d of clean.diaries) await _put('diaries', mark(d));
+    for (const w of (clean.wishlist || [])) await _put('wishlist', mark(w));
     // 点亮集合/常驻城市配置仍走本地 IndexedDB
     const vp = Array.isArray(clean.visitedProvinces) ? clean.visitedProvinces : [];
     const vc = Array.isArray(clean.visitedCities) ? clean.visitedCities : [];
