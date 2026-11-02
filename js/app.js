@@ -1500,7 +1500,7 @@ function bindWish() {
    3) 预取只取目标级别、低优先级、限量并发，避免和可视瓦片抢带宽；
    4) 隐藏业务城市圆点/省界外轮廓，只保留播放图层。 */
 let _playGroup = null, _play = null;
-const DWELL_MS = 1000, END_MS = 1800, INTRO_MS = 1200, HOME_MS = 700;
+const DWELL_MS = 1000, END_MS = 1800, INTRO_MS = 1200, HOME_MS = 700, NO_MAP_MS = 1500;
 const MIN_SEG_MS = 1800, MAX_SEG_MS = 8000;
 const easeInOutCubic = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
@@ -1586,53 +1586,66 @@ function orientedGeom(geom, leg, A, B) {
   if (same(g.B, A)) return { A: g.B, B: g.A, ctrl: g.ctrl, pts: g.pts.slice().reverse() };
   return g;
 }
-// 播放计划：只读取当前行程的交通段（leg.tripId === tripId），按出发时间排序后逐段播放。
-// 不再补「常驻地→首城」「末城→常驻地」的合成段，也不在没有交通段的城市之间画兜底直线。
-// 每一段交通段 = 一个 seg 相位 + 一个抵达点停留；seq[i] 就是第 i 段的目的地。
+// 播放计划：逐条读取当前行程的交通段（leg.tripId === tripId），按出发/到达时间排序。
+// 每一段交通段都会播放一次：重复城市、往返、甚至起止相同的段也照播，不补合成段。
+// 有坐标的段沿地图连线动画；缺坐标的段只显示状态、镜头不动，但仍然占一次播放。
 function buildPlayPlan(tripId) {
   const myLegs = LEGS.filter(l => l.tripId === tripId)
     .sort((a, b) => (a.departAt || a.arriveAt || '9999').localeCompare(b.departAt || b.arriveAt || '9999') || String(a.id).localeCompare(String(b.id)));
   const geom = computeLegGeometries();   // 与地图连线共用同一套路径点/轨道偏移
   const seq = [], segs = [];
   const hasCoord = p => !!(p && p.lat != null && p.lng != null && isFinite(Number(p.lat)) && isFinite(Number(p.lng)));
+  let lastPt = null;   // 上一个有坐标的抵达点，用于计算下一段的缩放
   myLegs.forEach((leg) => {
     const f = legPlayEndpoint(leg, 'from'), t = legPlayEndpoint(leg, 'to');
-    if (!hasCoord(f) || !hasCoord(t)) {
-      console.log('[footprint][play-diag] skip leg (missing coords)', { legId: leg.id, mode: leg.mode, from: f, to: t });
-      return;
-    }
-    const A = [Number(f.lat), Number(f.lng)], B = [Number(t.lat), Number(t.lng)];
-    if (Math.abs(A[0] - B[0]) < 1e-6 && Math.abs(A[1] - B[1]) < 1e-6) {
-      console.log('[footprint][play-diag] skip leg (same endpoints)', { legId: leg.id, mode: leg.mode, A, B });
-      return;
-    }
-    const i = segs.length;
     const st = legStyle(leg.mode);
-    let pts, ctrl = null, segA = A, segB = B;
-    const g = orientedGeom(geom, leg, A, B);
-    if (g) { segA = g.A; segB = g.B; pts = g.pts; ctrl = g.ctrl; }
-    else ({ pts, ctrl } = buildPath(A, B, leg.mode));
-    segs.push({
-      hasLeg: true, legId: leg.id, pts, ctrl, mode: leg.mode,
-      color: st.color, icon: st.icon, label: st.label,
-      from: segA, to: segB,
-      fromName: f.name || '', toName: t.name || '',
-      ms: segDuration(segA, segB, leg.mode),
-      zoom: playZoomFor(i ? seq[i - 1] : null, { lat: segB[0], lng: segB[1] }),
-    });
-    // 抵达点：回常驻地按“常驻地”标注；否则优先用行程内城市（带到达日期），最后用端点名称
-    const isHomeDest = t.kind === 'home';
-    const destStop = isHomeDest ? null : STOPS.find(s => s.tripId === tripId && endpointHitsStop(t, s));
+    const i = segs.length;
+    const fromName = (f && f.name) || (leg.from && leg.from.name) || '出发地';
+    const toName = (t && t.name) || (leg.to && leg.to.name) || '目的地';
+    const A = hasCoord(f) ? [Number(f.lat), Number(f.lng)] : null;
+    const B = hasCoord(t) ? [Number(t.lat), Number(t.lng)] : null;
+
+    // 抵达点：行程内城市优先（带到达日期）；回常驻地标注“常驻地”；否则用端点名称
+    const isHomeDest = !!(t && t.kind === 'home');
+    const destStop = (isHomeDest || !t) ? null : STOPS.find(s => s.tripId === tripId && endpointHitsStop(t, s));
     const destName = isHomeDest ? ((HOME_CITY.name || '常驻地') + '（常驻地）')
-      : (destStop ? destStop.nameZh : (t.name || '目的地'));
+      : (destStop ? destStop.nameZh : toName);
+    const destPt = (destStop && hasCoord({ lat: destStop.lat, lng: destStop.lng }))
+      ? [Number(destStop.lat), Number(destStop.lng)]
+      : B;
+
+    let pts = [], ctrl = null, segA = A, segB = B;
+    const noMap = !(A && B);   // 起止缺任一端坐标：无法画线，但这一段仍然要播放
+    if (!noMap) {
+      const same = Math.abs(A[0] - B[0]) < 1e-6 && Math.abs(A[1] - B[1]) < 1e-6;
+      if (same) {
+        pts = [A, B];   // 起止相同：原地播放，不生成曲线（避免零向量算控制点）
+      } else {
+        const g = orientedGeom(geom, leg, A, B);
+        if (g) { segA = g.A; segB = g.B; pts = g.pts; ctrl = g.ctrl; }
+        else ({ pts, ctrl } = buildPath(A, B, leg.mode));
+      }
+    }
+    const destObj = destPt ? { lat: destPt[0], lng: destPt[1] } : null;
+    segs.push({
+      hasLeg: true, legId: leg.id, noMap, pts, ctrl, mode: leg.mode,
+      color: st.color, icon: st.icon, label: st.label,
+      from: noMap ? null : segA, to: noMap ? null : segB,
+      fromName, toName,
+      ms: noMap ? NO_MAP_MS : segDuration(segA, segB, leg.mode),
+      zoom: destObj ? playZoomFor(lastPt, destObj) : null,
+    });
     seq.push({
       nameZh: destName,
-      lat: segB[0], lng: segB[1],
+      lat: destPt ? destPt[0] : null,
+      lng: destPt ? destPt[1] : null,
       arriveDate: destStop ? (destStop.arriveDate || '') : '',
+      noCoords: !destPt,
     });
+    if (destPt) lastPt = destObj;
     console.log('[footprint][play-diag] plan seg', i, {
-      legId: leg.id, mode: leg.mode, from: f.name, to: destName,
-      A: segA, B: segB, hasLeg: true,
+      legId: leg.id, mode: leg.mode, from: fromName, to: destName,
+      A: segA, B: segB, noMap, hasLeg: true,
     });
   });
   return { seq, segs };
@@ -1802,24 +1815,38 @@ function enterPlayPhase(phase) {
     st.segLine = null; st.seg = null;
     fadePlayRunner();
     const city = st.seq[phase.i];
-    showPlayMarker(city);
+    const hasCity = city && city.lat != null && city.lng != null
+      && isFinite(Number(city.lat)) && isFinite(Number(city.lng));
+    if (hasCity) showPlayMarker(city);
     updatePlayProgress(phase.i + 1, st.seq.length);
     setPlayStatus(`📍 ${city.nameZh}${city.arriveDate ? ' · ' + city.arriveDate : ''}`);
     const nx = st.segs[phase.i + 1];
-    if (nx) {
+    if (hasCity && nx && !nx.noMap && nx.zoom != null) {
       // 变焦放在停留期：镜头不动，只缩放，给下一段留出瓦片加载时间
       if (Math.abs(nx.zoom - map.getZoom()) > 0.01) {
         map.setView([city.lat, city.lng], nx.zoom, { animate: true });
       }
       st.zoom = nx.zoom;
       prefetchTilesAlong(nx.pts, nx.zoom, 10);
-      prefetchArea(nx.to[0], nx.to[1], nx.zoom, 1);
+      if (nx.to) prefetchArea(nx.to[0], nx.to[1], nx.zoom, 1);
     } else {
+      // 上一段缺坐标、镜头没有跟过去时，抵达点若有坐标就平移过去，保证城市标记可见
+      if (hasCity && st.segs[phase.i] && st.segs[phase.i].noMap) {
+        if (map.stop) map.stop();
+        map.setView([Number(city.lat), Number(city.lng)], map.getZoom(), { animate: true });
+      }
       st.zoom = map.getZoom();
     }
   } else if (phase.type === 'seg') {
     const seg = st.segs[phase.i];
     st.seg = seg;
+    st.arrowShown = false;
+    if (seg.noMap) {   // 缺坐标的交通段：照常占一个相位并显示状态，但不移动镜头、不画线
+      st.segLine = null; st.runner = null;
+      st.zoom = map.getZoom();
+      setPlayStatus(`${seg.icon} ${seg.fromName} → ${seg.toName}（缺坐标）`);
+      return;
+    }
     st.zoom = seg.zoom;
     if (map.stop) map.stop();
     map.setView(seg.from, st.zoom, { animate: false });   // 段首对齐，段内不再改缩放
@@ -1831,7 +1858,7 @@ function enterPlayPhase(phase) {
           lineCap: 'round', lineJoin: 'round',
           interactive: false,
         }).addTo(_playGroup)
-      : null;                                       // 无坐标才不画线；相邻城市缺 Leg 时也画兜底直线
+      : null;
     st.runner = L.marker(seg.pts[0], {
       icon: L.divIcon({
         className: 'play-runner-icon', iconSize: [16, 16], iconAnchor: [8, 8],
@@ -1839,7 +1866,6 @@ function enterPlayPhase(phase) {
       }),
       interactive: false,
     }).addTo(_playGroup);
-    st.arrowShown = false;
     setPlayStatus(`${seg.icon} ${seg.fromName} → ${seg.toName}`);
   } else if (phase.type === 'intro') {
     st.zoom = st.introZoom;
@@ -1850,7 +1876,7 @@ function enterPlayPhase(phase) {
       easeLinearity: 0.25,
     });
     prefetchArea(st.introTo.lat, st.introTo.lng, st.introZoom, 1);
-    if (st.segs[0]) {
+    if (st.segs[0] && !st.segs[0].noMap) {
       prefetchTilesAlong(st.segs[0].pts, st.segs[0].zoom, 10);
       prefetchArea(st.segs[0].to[0], st.segs[0].to[1], st.segs[0].zoom, 1);
       if (isHomeCoord(st.segs[0].from) && !isHomeCity(st.seq[0])) showHomeMarker();   // 常驻地出发标记
@@ -1876,9 +1902,19 @@ function enterPlayPhase(phase) {
       st.segLine = null; st.seg = null;
     }
     fadePlayRunner();
-    // 收尾视野覆盖所有交通段的起止点（播放计划里的每一段都属于当前行程）
-    const endPts = st.seq.map(c => [c.lat, c.lng]);
-    st.segs.forEach(s => { if (s && s.from) endPts.push(s.from); if (s && s.to) endPts.push(s.to); });
+    // 收尾视野覆盖所有交通段的起止点（缺坐标的段不参与取景）
+    const endPts = [];
+    st.seq.forEach(c => {
+      if (c && c.lat != null && c.lng != null && isFinite(Number(c.lat)) && isFinite(Number(c.lng))) {
+        endPts.push([Number(c.lat), Number(c.lng)]);
+      }
+    });
+    st.segs.forEach(s => {
+      if (!s || s.noMap) return;
+      if (s.from) endPts.push(s.from);
+      if (s.to) endPts.push(s.to);
+    });
+    if (!endPts.length) endPts.push([HOME_CITY.lat, HOME_CITY.lng]);
     const endBounds = L.latLngBounds(endPts);
     const maxZ = st.seq.length > 1 ? 9 : 11;
     const z = Math.min(maxZ, map.getBoundsZoom(endBounds, false, L.point(60, 60)));
@@ -1911,7 +1947,7 @@ function playLoop(now) {
   const tp = Math.min(1, Math.max(0, (st.t - phase.start) / span));
   const te = easeInOutCubic(tp);
   if (phase.type === 'seg') tickTileUpdates(now);       // 瓦片更新限流（5 次/秒）
-  if (phase.type === 'seg') {                           // 路径生长 + 光点 + 相机平移（缩放固定）
+  if (phase.type === 'seg' && st.seg && !st.seg.noMap) { // 路径生长 + 光点 + 相机平移（缩放固定）
     const seg = st.seg, pts = seg.pts;
     const head = pathPoint(pts, te);
     if (st.segLine) {
@@ -1999,7 +2035,7 @@ function updatePlayStats() {
   const tripId = document.getElementById('play-trip').value;
   const n = STOPS.filter(s => s.tripId === tripId).length;
   const m = LEGS.filter(l => l.tripId === tripId).length;
-  document.getElementById('play-stats').textContent = `该行程：${n} 个城市 · ${m} 段交通`;
+  document.getElementById('play-stats').textContent = `该行程：${n} 个城市 · ${m} 段交通（逐段播放 ${m} 次）`;
 }
 // 播放期隐藏业务图层，减少 DOM/绘制；收尾再恢复
 function hideLayersForPlay() {
@@ -2013,9 +2049,16 @@ function hideLayersForPlay() {
 function startPlay(tripId) {
   if (_play && _play.running) exitPlay();
   if (!map || !_mapReady) { toast('地图尚未就绪，请稍候再试'); return; }
-  // 只播放该行程自己的交通段：没有记录交通段的城市/常驻地往返不会出现在轨迹里
+  // 有几段交通就播放几次：按当前行程的交通段逐条播放，重复城市/缺坐标的段也各占一次
   const { seq, segs } = buildPlayPlan(tripId);
-  if (!seq.length) { toast('该行程暂无可播放的交通段（需有起止坐标）'); return; }
+  if (!seq.length) { toast('该行程暂无交通段，先去「录入」添加吧'); return; }
+  // 开场位置：第一段有坐标的交通段起点；全都没坐标时就飞往常驻地
+  const firstPlaced = segs.find(s => s && !s.noMap);
+  const firstPlacedCity = seq.find(c => c && c.lat != null && c.lng != null && isFinite(Number(c.lat)) && isFinite(Number(c.lng)));
+  const introTo = firstPlaced ? { lat: firstPlaced.from[0], lng: firstPlaced.from[1] }
+    : (firstPlacedCity ? { lat: Number(firstPlacedCity.lat), lng: Number(firstPlacedCity.lng) }
+      : { lat: HOME_CITY.lat, lng: HOME_CITY.lng });
+  const introZoom = firstPlaced && firstPlaced.zoom != null ? firstPlaced.zoom : playZoomFor(null, introTo);
   if (_drillAdcode) backToChina();
   closeAllDrawers();
   if (map.stop) map.stop();
@@ -2029,8 +2072,7 @@ function startPlay(tripId) {
   _prefetched.clear(); _prefetchQueue.length = 0;
   _play = {
     running: true, paused: false, speed, tripId, seq, segs, phases, total,
-    introTo: { lat: segs[0].from[0], lng: segs[0].from[1] },   // 开场飞向第一段交通段的起点
-    introZoom: segs[0].zoom,
+    introTo, introZoom,
     t: 0, zoom: map.getZoom(), phaseKey: '', last: performance.now(), raf: 0, fillAt: 0,
     tileZoomUpdate: [_tileLight, _tileDark].map(l => l ? l.options.updateWhenZooming : null),
   };
