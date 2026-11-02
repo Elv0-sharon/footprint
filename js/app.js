@@ -9,7 +9,7 @@ let _drillAdcode = null, _drillProvName = null, _cityGeo = null;
 const _cityGeoCache = new Map();
 let _editingDiaryId = null;
 let _editingTripId = null, _editingStopId = null, _editingLegId = null, _editingWishId = null;
-let _legDirty = false;   // Leg 编辑表单是否有改动（控制"添加返程"按钮可用）
+let _legDirty = false;   // Leg 编辑表单是否有改动（添加返程前先保存原段，避免丢改动）
 let _legAutoArrive = ''; // 出发日期/时刻自动同步到到达端的最近一次值（用于识别到达端是否被手动改过）
 let _legYearFilter = ''; // 交通段城市下拉的年份筛选（'' = 全部年份）
 let _timelineOrders = {}; // tripId -> 手动拖动后的时间线条目顺序（本地 config 持久化）
@@ -1193,12 +1193,12 @@ function resetLegForm() {
   updateLegManualVisibility();
   syncReturnBtn();
 }
-// "添加返程"按钮：仅编辑态显示，未改动灰显
+// "添加返程"按钮：进入编辑态即可直接点击（不必先改字段）
 function syncReturnBtn() {
   const btn = document.getElementById('btn-add-return');
   if (!btn) return;
   btn.hidden = !_editingLegId;
-  btn.disabled = !(_editingLegId && _legDirty);
+  btn.disabled = !_editingLegId;
 }
 
 /* ===== 已有数据：按行程折叠（城市/到访 + 交通段收在行程下面） ===== */
@@ -1523,7 +1523,7 @@ function startEditLeg(id) {
   f.note.value = l.note || '';
   setEditState('leg', legEndpointLabel(l, 'from') + ' → ' + legEndpointLabel(l, 'to'));
   _legDirty = false;
-  syncReturnBtn();   // 编辑态显示返程按钮（未改动灰显）
+  syncReturnBtn();   // 编辑态显示返程按钮（可直接点击）
   f.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -2743,7 +2743,7 @@ function bindForms() {
     _legYearFilter = e.target.value;
     refreshLegCitySelects();
   });
-  // 编辑态任一字段改动 → "添加返程"变为可点
+  // 编辑态任一字段改动 → 记录 dirty，添加返程时先保存原段
   legForm.addEventListener('input', () => { if (_editingLegId) { _legDirty = true; syncReturnBtn(); } });
   legForm.addEventListener('change', () => { if (_editingLegId) { _legDirty = true; syncReturnBtn(); } });
   // 出发日期/时刻变化时自动同步到达端：到达端为空或仍是上次自动同步值时才覆盖；手动改过的到达端不吞
@@ -2759,21 +2759,44 @@ function bindForms() {
     legForm.departDate.addEventListener(ev, syncLegArrive);
     legForm.departClock.addEventListener(ev, syncLegArrive);
   });
-  // 添加返程：反向生成一条新 Leg（原段不动），路线名称/时间/花费/备注留空
+  // 添加返程：反向生成一条新 Leg（原段不动），并直接切到新返程段编辑时间。
+  // 若原段有未保存的改动，先按表单值保存原段，避免切换后丢失。
   document.getElementById('btn-add-return').addEventListener('click', async () => {
-    if (!_editingLegId || !_legDirty) return;
+    if (!_editingLegId) return;
     const f = document.getElementById('form-leg');
-    const fe = legFormEndpoint(f, 'to');    // 反向：新出发 = 当前到达
-    const te = legFormEndpoint(f, 'from');  // 新到达 = 当前出发
-    if (!fe || !te) { toast('请先完善起止城市'); return; }
-    if (fe.name.trim() === te.name.trim()) { toast('出发与到达城市不能相同'); return; }
-    await DB.putLeg({
-      id: uid(), tripId: f.tripId.value, from: fe, to: te, mode: f.mode.value,
-      departAt: '', arriveAt: '', cost: null, note: '',
-    });
-    setTripExpanded(f.tripId.value, true);
-    await reload();
-    toast('已添加返程段');
+    const editId = _editingLegId;
+    const tripId = f.tripId.value;
+    if (!tripId) { toast('请先选择行程'); return; }
+    const fromEp = legFormEndpoint(f, 'from');
+    const toEp = legFormEndpoint(f, 'to');
+    if (!fromEp || !toEp) { toast('请先完善起止城市'); return; }
+    if (fromEp.name.trim() === toEp.name.trim()) { toast('出发与到达城市不能相同'); return; }
+    try {
+      if (_legDirty) {
+        await DB.putLeg({
+          id: editId, tripId, from: fromEp, to: toEp, mode: f.mode.value,
+          departAt: joinLegTime(f.departDate.value, f.departClock.value),
+          arriveAt: joinLegTime(f.arriveDate.value, f.arriveClock.value),
+          cost: f.cost.value === '' ? null : Number(f.cost.value), note: f.note.value.trim(),
+        });
+      }
+      const returnId = uid();
+      await DB.putLeg({
+        id: returnId, tripId,
+        from: toEp, to: fromEp,   // 反向：新出发 = 当前到达
+        mode: f.mode.value,
+        departAt: '', arriveAt: '', cost: null, note: '',
+      });
+      setTripExpanded(tripId, true);
+      await reload();
+      startEditLeg(returnId);     // 直接打开新返程段，填好时间保存即可
+      const df = document.getElementById('form-leg');
+      if (df && df.departDate) df.departDate.focus();
+      toast('已生成返程段，填好时间后点「保存交通段」');
+    } catch (err) {
+      console.error('[footprint] 添加返程失败：', err);
+      toast('添加返程失败：' + ((err && (err.message || err.code)) || err));
+    }
   });
   // 手动输入城市名时，若与已有城市/常驻城市同名则自动回填坐标（可再手动覆盖）
   [['from', 'Name', 'Lat', 'Lng'], ['to', 'Name', 'Lat', 'Lng']].forEach(([end, n, la, ln]) => {
