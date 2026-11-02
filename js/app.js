@@ -108,8 +108,8 @@ function mapPalette() {
 
 // 六种交通方式；walk 仅作旧数据兼容渲染，不出现在图例/表单
 const MODE_STYLE = {
-  plane:     { color: '#3d5a6c', dash: null, icon: '✈️', label: '飞机' },
-  highspeed: { color: '#2E7D63', dash: null, icon: '🚄', label: '高铁/动车' },
+  plane:     { color: '#2F6FED', dash: null, icon: '✈️', label: '飞机' },      // 明亮蓝：远看与绿色高铁线区分
+  highspeed: { color: '#00B36B', dash: null, icon: '🚄', label: '高铁/动车' }, // 鲜亮绿：与飞机蓝、省界墨绿都拉开
   train:     { color: '#8a5a2b', dash: null, icon: '🚞', label: '普速火车' },
   bus:       { color: '#C99A45', dash: null, icon: '🚌', label: '大巴' },
   boat:      { color: '#4a90a4', dash: null, icon: '⛵', label: '轮船' },
