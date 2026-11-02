@@ -796,7 +796,7 @@ function timelineLegItem(l) {
 function timelineTripItems(trip) {
   const stops = STOPS.filter(s => s.tripId === trip.id);
   const legs = LEGS.filter(l => l.tripId === trip.id)
-    .sort((a, b) => (a.departAt || '9999').localeCompare(b.departAt || '9999') || String(a.id).localeCompare(String(b.id)));
+    .sort((a, b) => (a.departAt || a.arriveAt || '9999').localeCompare(b.departAt || b.arriveAt || '9999') || String(a.id).localeCompare(String(b.id)));
   // 每条交通段只认一个抵达城市；城市取最早抵达它的那一段作为“锚点”。
   const anchorLeg = new Map();   // legId -> stop
   const anchored = new Set();    // 已有抵达段的 stopId
@@ -1500,18 +1500,10 @@ function bindWish() {
    3) 预取只取目标级别、低优先级、限量并发，避免和可视瓦片抢带宽；
    4) 隐藏业务城市圆点/省界外轮廓，只保留播放图层。 */
 let _playGroup = null, _play = null;
-let _orphanLegReported = false;   // 诊断：缺 tripId 的旧 leg 只打印一次
-const SEG_MS = 2500, DWELL_MS = 1000, END_MS = 1800, INTRO_MS = 1200, HOME_MS = 700;
+const DWELL_MS = 1000, END_MS = 1800, INTRO_MS = 1200, HOME_MS = 700;
 const MIN_SEG_MS = 1800, MAX_SEG_MS = 8000;
 const easeInOutCubic = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
-// 播放顺序：行程内城市按到达日期升序，无日期按录入顺序排最后
-function playSequence(tripId) {
-  return STOPS.filter(s => s.tripId === tripId)
-    .map((s, i) => ({ s, ord: s.arriveDate || '9999-' + String(i).padStart(6, '0') }))
-    .sort((a, b) => a.ord.localeCompare(b.ord))
-    .map(x => x.s);
-}
 function isHomeCoord(p) {
   return !!p && Math.abs(Number(p[0]) - HOME_CITY.lat) < 0.05 && Math.abs(Number(p[1]) - HOME_CITY.lng) < 0.05;
 }
@@ -1544,23 +1536,6 @@ function endpointHitsStop(r, stop) {
     return Math.abs(Number(r.lat) - Number(stop.lat)) < 0.05 && Math.abs(Number(r.lng) - Number(stop.lng)) < 0.05;
   }
   return false;
-}
-// 只在当前行程的 leg 池里找相邻城市之间的交通段
-function legBetween(prevId, curId, pool) {
-  const prev = stopById(prevId), cur = stopById(curId);
-  if (!prev || !cur) return null;
-  return (pool || []).find(l => {
-    const f = legPlayEndpoint(l, 'from'), t = legPlayEndpoint(l, 'to');
-    return (endpointHitsStop(f, prev) && endpointHitsStop(t, cur)) || (endpointHitsStop(f, cur) && endpointHitsStop(t, prev));
-  }) || null;
-}
-function endpointName(leg, end, fallback) {
-  const e = leg && leg[end];
-  if (e && e.kind === 'stop' && e.stopId) {
-    const s = stopById(e.stopId);
-    return s ? s.nameZh : (e.name || fallback || '');
-  }
-  return (e && e.name) || fallback || '';
 }
 // 路径参数取点：t∈[0,1] → 坐标（段内线性插值，t 本身经 easeInOutCubic 缓动）
 function pathPoint(pts, t) {
@@ -1611,180 +1586,71 @@ function orientedGeom(geom, leg, A, B) {
   if (same(g.B, A)) return { A: g.B, B: g.A, ctrl: g.ctrl, pts: g.pts.slice().reverse() };
   return g;
 }
-// 播放前预读：把行程城市、每段 Leg 的完整路径点、时长、目标缩放一次性构建进内存，播放中零查询
-// segs[i] = 进入 seq[i] 的段（i>=1 为相邻城市间；i===0 为「从常驻地/外部进入首城」的进出场段，可能为 null）
-function buildSegments(seq, tripId) {
-  const segs = [];
-  const used = new Set();   // 一条 Leg 只分配给一个段，避免去/返共用时重复播放
-  if (!_orphanLegReported) {
-    _orphanLegReported = true;
-    const orphanLegs = LEGS.filter(l => !l.tripId);
-    console.log('[footprint][play-diag] orphan legs missing tripId:', orphanLegs.length, orphanLegs.map(l => l.id));
-  }
-  const myLegs = tripId ? LEGS.filter(l => l.tripId === tripId) : [];   // 只使用当前行程；孤儿段不纳入
+// 播放计划：只读取当前行程的交通段（leg.tripId === tripId），按出发时间排序后逐段播放。
+// 不再补「常驻地→首城」「末城→常驻地」的合成段，也不在没有交通段的城市之间画兜底直线。
+// 每一段交通段 = 一个 seg 相位 + 一个抵达点停留；seq[i] 就是第 i 段的目的地。
+function buildPlayPlan(tripId) {
+  const myLegs = LEGS.filter(l => l.tripId === tripId)
+    .sort((a, b) => (a.departAt || a.arriveAt || '9999').localeCompare(b.departAt || b.arriveAt || '9999') || String(a.id).localeCompare(String(b.id)));
   const geom = computeLegGeometries();   // 与地图连线共用同一套路径点/轨道偏移
-  for (let i = 0; i < seq.length; i++) {
-    let leg = null, A = null, fromName = '', toName = seq[i].nameZh || '';
-    const B = [seq[i].lat, seq[i].lng];
-    if (i > 0) {
-      leg = legBetween(seq[i - 1].id, seq[i].id, myLegs);
-      if (leg && used.has(leg.id)) leg = null;
-      A = [seq[i - 1].lat, seq[i - 1].lng];
-      fromName = seq[i - 1].nameZh || '';
-    } else {
-      // 首城进场段：只允许起点是常驻地或手动点（home/custom），且只看当前行程的 leg
-      leg = myLegs.find(l => {
-        if (used.has(l.id)) return false;
-        if (!l.from || (l.from.kind !== 'home' && l.from.kind !== 'custom')) return false;
-        const f = legPlayEndpoint(l, 'from'), t = legPlayEndpoint(l, 'to');
-        if (!f || !t) return false;
-        return endpointHitsStop(t, seq[0]) && !endpointHitsStop(f, seq[0]);
-      }) || null;
-      if (leg) {
-        const r = legPlayEndpoint(leg, 'from');
-        A = (r && r.lat != null && r.lat !== '' && r.lng != null && r.lng !== '') ? [Number(r.lat), Number(r.lng)] : null;
-        if (!A) {
-          console.log('[footprint][play-diag] seg 0 inbound-no-coords', { legId: leg.id, mode: leg.mode, from: r });
-          leg = null;   // 进场端缺坐标：跳过该段
-        } else {
-          fromName = endpointName(leg, 'from', (HOME_CITY && HOME_CITY.name) || '出发地');
-        }
-      }
+  const seq = [], segs = [];
+  const hasCoord = p => !!(p && p.lat != null && p.lng != null && isFinite(Number(p.lat)) && isFinite(Number(p.lng)));
+  myLegs.forEach((leg) => {
+    const f = legPlayEndpoint(leg, 'from'), t = legPlayEndpoint(leg, 'to');
+    if (!hasCoord(f) || !hasCoord(t)) {
+      console.log('[footprint][play-diag] skip leg (missing coords)', { legId: leg.id, mode: leg.mode, from: f, to: t });
+      return;
     }
-    if (leg) { used.add(leg.id); toName = seq[i].nameZh || endpointName(leg, 'to', ''); }
-    if (!A) {
-      console.log('[footprint][play-diag] seg', i, {
-        from: fromName || (i ? seq[i - 1].nameZh : null),
-        to: toName,
-        legId: leg ? leg.id : null,
-        mode: leg ? leg.mode : null,
-        A: null, B,
-      });
-      segs[i] = null; continue;
+    const A = [Number(f.lat), Number(f.lng)], B = [Number(t.lat), Number(t.lng)];
+    if (Math.abs(A[0] - B[0]) < 1e-6 && Math.abs(A[1] - B[1]) < 1e-6) {
+      console.log('[footprint][play-diag] skip leg (same endpoints)', { legId: leg.id, mode: leg.mode, A, B });
+      return;
     }
-    const mode = leg ? leg.mode : 'jump';
-    const st = legStyle(leg ? leg.mode : 'train');
+    const i = segs.length;
+    const st = legStyle(leg.mode);
     let pts, ctrl = null, segA = A, segB = B;
-    const g = leg && orientedGeom(geom, leg, A, B);
+    const g = orientedGeom(geom, leg, A, B);
     if (g) { segA = g.A; segB = g.B; pts = g.pts; ctrl = g.ctrl; }
-    else ({ pts, ctrl } = buildPath(A, B, mode));
-    segs[i] = {
-      hasLeg: !!leg, legId: leg ? leg.id : null, pts, ctrl, mode,
+    else ({ pts, ctrl } = buildPath(A, B, leg.mode));
+    segs.push({
+      hasLeg: true, legId: leg.id, pts, ctrl, mode: leg.mode,
       color: st.color, icon: st.icon, label: st.label,
-      from: segA, to: segB, fromName, toName,
-      ms: segDuration(segA, segB, mode),
-      zoom: playZoomFor(i ? seq[i - 1] : null, seq[i]),
-    };
-    console.log('[footprint][play-diag] seg', i, {
-      from: fromName, to: toName,
-      legId: leg ? leg.id : null, mode: leg ? leg.mode : null,
-      A: segA, B: segB, rawA: A, rawB: B, hasLeg: !!leg,
+      from: segA, to: segB,
+      fromName: f.name || '', toName: t.name || '',
+      ms: segDuration(segA, segB, leg.mode),
+      zoom: playZoomFor(i ? seq[i - 1] : null, { lat: segB[0], lng: segB[1] }),
     });
-  }
-  // 没有登记「常驻地 → 首城」交通段时，补一段从常驻地出发的动画（沿用行程第一段的交通方式，不画虚线）
-  if (!segs[0] && seq.length && !isHomeCity(seq[0])) {
-    const A = [HOME_CITY.lat, HOME_CITY.lng], B = [seq[0].lat, seq[0].lng];
-    const infer = (segs[1] && segs[1].mode && segs[1].mode !== 'jump') ? segs[1].mode : 'car';
-    const st = legStyle(infer);
-    const { pts, ctrl } = buildPath(A, B, infer);
-    segs[0] = {
-      hasLeg: true, synthetic: true, pts, ctrl, mode: infer,
-      color: st.color, icon: st.icon, label: st.label,
-      from: A, to: B, fromName: HOME_CITY.name, toName: seq[0].nameZh,
-      ms: segDuration(A, B, infer),
-      zoom: playZoomFor(null, seq[0]),
-    };
-    console.log('[footprint][play-diag] seg 0 synthetic-inbound', {
-      from: HOME_CITY.name, to: seq[0].nameZh,
-      legId: null, mode: infer, A, B,
+    // 抵达点：回常驻地按“常驻地”标注；否则优先用行程内城市（带到达日期），最后用端点名称
+    const isHomeDest = t.kind === 'home';
+    const destStop = isHomeDest ? null : STOPS.find(s => s.tripId === tripId && endpointHitsStop(t, s));
+    const destName = isHomeDest ? ((HOME_CITY.name || '常驻地') + '（常驻地）')
+      : (destStop ? destStop.nameZh : (t.name || '目的地'));
+    seq.push({
+      nameZh: destName,
+      lat: segB[0], lng: segB[1],
+      arriveDate: destStop ? (destStop.arriveDate || '') : '',
     });
-  }
-  // 尾段（离场）：最后一段旅程结束后，若存在「离开末城返回常驻地/其他城市」的交通段，也纳入播放
-  if (seq.length) {
-    const last = seq[seq.length - 1];
-    const leg = myLegs.find(l => {
-      if (used.has(l.id)) return false;
-      const f = legPlayEndpoint(l, 'from'), t = legPlayEndpoint(l, 'to');
-      if (!f || !t) return false;
-      if (!endpointHitsStop(f, last)) return false;
-      const toHomeOrCustom = l.to && (l.to.kind === 'home' || l.to.kind === 'custom');
-      return !!toHomeOrCustom || !seq.some(s => endpointHitsStop(t, s));
-    }) || null;
-    if (leg) {
-      const r = legPlayEndpoint(leg, 'to');
-      const B = (r.lat != null && r.lat !== '' && r.lng != null && r.lng !== '') ? [Number(r.lat), Number(r.lng)] : null;
-      if (B) {
-        used.add(leg.id);
-        const A = [last.lat, last.lng];
-        const stl = legStyle(leg.mode);
-        let pts, ctrl = null, segA = A, segB = B;
-        const g = orientedGeom(geom, leg, A, B);
-        if (g) { segA = g.A; segB = g.B; pts = g.pts; ctrl = g.ctrl; }
-        else ({ pts, ctrl } = buildPath(A, B, leg.mode));
-        segs[seq.length] = {
-          hasLeg: true, legId: leg.id, pts, ctrl, mode: leg.mode, outbound: true,
-          color: stl.color, icon: stl.icon, label: stl.label,
-          from: segA, to: segB, fromName: last.nameZh || '', toName: endpointName(leg, 'to', '目的地'),
-          ms: segDuration(segA, segB, leg.mode),
-          zoom: playZoomFor(last, { lat: B[0], lng: B[1] }),
-        };
-        console.log('[footprint][play-diag] seg', seq.length, 'outbound', {
-          from: last.nameZh || '', to: endpointName(leg, 'to', '目的地'),
-          legId: leg.id, mode: leg.mode,
-          A: segA, B: segB, rawA: A, rawB: B,
-        });
-      } else {
-        console.log('[footprint][play-diag] seg', seq.length, 'outbound-no-coords', {
-          from: last.nameZh || '', to: endpointName(leg, 'to', '目的地'),
-          legId: leg.id, mode: leg.mode, A: [last.lat, last.lng], B: null,
-        });
-      }
-    }
-  }
-  // 没有登记「末城 → 常驻地」返程段时，补一段回常驻地的动画（沿用行程最后一段的交通方式，不画虚线）
-  if (seq.length && !segs[seq.length] && !isHomeCity(seq[seq.length - 1])) {
-    const last = seq[seq.length - 1];
-    const A = [last.lat, last.lng], B = [HOME_CITY.lat, HOME_CITY.lng];
-    const prev = segs[seq.length - 1];
-    const infer = (prev && prev.mode && prev.mode !== 'jump') ? prev.mode : 'car';
-    const st = legStyle(infer);
-    const { pts, ctrl } = buildPath(A, B, infer);
-    segs[seq.length] = {
-      hasLeg: true, synthetic: true, outbound: true, pts, ctrl, mode: infer,
-      color: st.color, icon: st.icon, label: st.label,
-      from: A, to: B, fromName: last.nameZh || '', toName: HOME_CITY.name,
-      ms: segDuration(A, B, infer),
-      zoom: playZoomFor(last, { lat: B[0], lng: B[1] }),
-    };
-    console.log('[footprint][play-diag] seg', seq.length, 'synthetic-outbound', {
-      from: last.nameZh || '', to: HOME_CITY.name,
-      legId: null, mode: infer, A, B,
+    console.log('[footprint][play-diag] plan seg', i, {
+      legId: leg.id, mode: leg.mode, from: f.name, to: destName,
+      A: segA, B: segB, hasLeg: true,
     });
-  }
-  if (seq.length && !segs[seq.length]) {
-    const last = seq[seq.length - 1];
-    console.log('[footprint][play-diag] seg', seq.length, 'no-outbound', {
-      from: last.nameZh || '', to: null, legId: null, mode: null,
-      A: [last.lat, last.lng], B: null,
-    });
-  }
-  return segs;
+  });
+  return { seq, segs };
 }
-// 全局时间轴：开场 → [进出场段(可选)] → 每段「线生长+光点」→ 每城停留 → 收尾拉回全国
+// 全局时间轴：开场 → 每段「线生长+光点」→ 抵达点停留 → 收尾拉回行程视野
 function buildTimeline(seq, segs) {
   const phases = []; let t = 0;
   phases.push({ type: 'intro', i: 0, start: 0, end: t += INTRO_MS });
+  if (!seq.length) { phases.push({ type: 'end', start: t, end: t += END_MS }); return { phases, total: t }; }
   if (segs[0]) {
     if (isHomeCoord(segs[0].from) && !isHomeCity(seq[0])) phases.push({ type: 'home', depart: true, start: t, end: t += HOME_MS });
     phases.push({ type: 'seg', i: 0, start: t, end: t += segs[0].ms });
   }
   phases.push({ type: 'city', i: 0, start: t, end: t += DWELL_MS });
   for (let i = 1; i < seq.length; i++) {
-    phases.push({ type: 'seg', i, start: t, end: t += (segs[i] ? segs[i].ms : SEG_MS) });
+    phases.push({ type: 'seg', i, start: t, end: t += segs[i].ms });
     phases.push({ type: 'city', i, start: t, end: t += DWELL_MS });
   }
-  if (segs[seq.length]) phases.push({ type: 'seg', i: seq.length, start: t, end: t += segs[seq.length].ms });   // 离场段
-  if (segs[seq.length] && isHomeCoord(segs[seq.length].to)) phases.push({ type: 'home', arrive: true, start: t, end: t += HOME_MS });
   phases.push({ type: 'end', start: t, end: t += END_MS });
   return { phases, total: t };
 }
@@ -2010,8 +1876,9 @@ function enterPlayPhase(phase) {
       st.segLine = null; st.seg = null;
     }
     fadePlayRunner();
+    // 收尾视野覆盖所有交通段的起止点（播放计划里的每一段都属于当前行程）
     const endPts = st.seq.map(c => [c.lat, c.lng]);
-    if (st.segs[st.seq.length] && st.segs[st.seq.length].outbound) endPts.push(st.segs[st.seq.length].to);
+    st.segs.forEach(s => { if (s && s.from) endPts.push(s.from); if (s && s.to) endPts.push(s.to); });
     const endBounds = L.latLngBounds(endPts);
     const maxZ = st.seq.length > 1 ? 9 : 11;
     const z = Math.min(maxZ, map.getBoundsZoom(endBounds, false, L.point(60, 60)));
@@ -2114,7 +1981,7 @@ function setMapLock(lock) {
 }
 function updatePlayProgress(idx, total) {
   const el = document.getElementById('play-progress');
-  if (el) el.textContent = `第 ${idx} / 共 ${total} 城`;
+  if (el) el.textContent = `第 ${idx} / 共 ${total} 段`;
 }
 function setPlayBar(show) {
   document.getElementById('play-bar').hidden = !show;
@@ -2146,8 +2013,9 @@ function hideLayersForPlay() {
 function startPlay(tripId) {
   if (_play && _play.running) exitPlay();
   if (!map || !_mapReady) { toast('地图尚未就绪，请稍候再试'); return; }
-  const seq = playSequence(tripId);
-  if (!seq.length) { toast('该行程暂无城市，无法播放'); return; }
+  // 只播放该行程自己的交通段：没有记录交通段的城市/常驻地往返不会出现在轨迹里
+  const { seq, segs } = buildPlayPlan(tripId);
+  if (!seq.length) { toast('该行程暂无可播放的交通段（需有起止坐标）'); return; }
   if (_drillAdcode) backToChina();
   closeAllDrawers();
   if (map.stop) map.stop();
@@ -2156,14 +2024,13 @@ function startPlay(tripId) {
   if (_wishGroup) map.removeLayer(_wishGroup); // 播放视图专注轨迹
   _playGroup = L.layerGroup().addTo(map);
   const speed = parseFloat(document.getElementById('play-speed').value) || 1;
-  const segs = buildSegments(seq, tripId);
   const { phases, total } = buildTimeline(seq, segs);
   map.options.zoomSnap = 0;                              // 播放期支持连续缩放，收尾恢复
   _prefetched.clear(); _prefetchQueue.length = 0;
   _play = {
     running: true, paused: false, speed, tripId, seq, segs, phases, total,
-    introTo: segs[0] ? { lat: segs[0].from[0], lng: segs[0].from[1] } : seq[0],   // 开场飞向进出场段起点（常驻地）或首城
-    introZoom: segs[0] ? segs[0].zoom : playZoomFor(null, seq[0]),
+    introTo: { lat: segs[0].from[0], lng: segs[0].from[1] },   // 开场飞向第一段交通段的起点
+    introZoom: segs[0].zoom,
     t: 0, zoom: map.getZoom(), phaseKey: '', last: performance.now(), raf: 0, fillAt: 0,
     tileZoomUpdate: [_tileLight, _tileDark].map(l => l ? l.options.updateWhenZooming : null),
   };
