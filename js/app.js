@@ -1586,12 +1586,32 @@ function orientedGeom(geom, leg, A, B) {
   if (same(g.B, A)) return { A: g.B, B: g.A, ctrl: g.ctrl, pts: g.pts.slice().reverse() };
   return g;
 }
-// 播放计划：逐条读取当前行程的交通段（leg.tripId === tripId），按出发/到达时间排序。
+// 播放顺序以时间线为准：优先使用拖动保存的顺序；没手动排过的段按时间线默认顺序补在后面。
+// 时间线上的城市条目只影响显示，不参与播放；播放单位始终是交通段。
+function orderedTripLegs(tripId) {
+  const legs = LEGS.filter(l => l.tripId === tripId);
+  const byKey = new Map(legs.map(l => ['l:' + l.id, l]));
+  const ordered = [], seen = new Set();
+  const saved = _timelineOrders[tripId];
+  if (Array.isArray(saved)) {
+    saved.forEach(k => {
+      if (typeof k !== 'string' || k.indexOf('l:') !== 0) return;
+      const leg = byKey.get(k);
+      if (leg && !seen.has(leg.id)) { seen.add(leg.id); ordered.push(leg); }
+    });
+  }
+  timelineTripItems({ id: tripId }).forEach(item => {
+    if (item.key.indexOf('l:') !== 0) return;
+    const leg = byKey.get(item.key);
+    if (leg && !seen.has(leg.id)) { seen.add(leg.id); ordered.push(leg); }
+  });
+  return ordered;
+}
+// 播放计划：严格按时间线上的排列（不看时间）逐段播放。
 // 每一段交通段都会播放一次：重复城市、往返、甚至起止相同的段也照播，不补合成段。
 // 有坐标的段沿地图连线动画；缺坐标的段只显示状态、镜头不动，但仍然占一次播放。
 function buildPlayPlan(tripId) {
-  const myLegs = LEGS.filter(l => l.tripId === tripId)
-    .sort((a, b) => (a.departAt || a.arriveAt || '9999').localeCompare(b.departAt || b.arriveAt || '9999') || String(a.id).localeCompare(String(b.id)));
+  const myLegs = orderedTripLegs(tripId);
   const geom = computeLegGeometries();   // 与地图连线共用同一套路径点/轨道偏移
   const seq = [], segs = [];
   const hasCoord = p => !!(p && p.lat != null && p.lng != null && isFinite(Number(p.lat)) && isFinite(Number(p.lng)));
