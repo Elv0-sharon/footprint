@@ -270,6 +270,38 @@ button.small.ghost:hover { background: var(--btn-hover); }
 .data-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; }
 .data-row .txt { flex: 1; min-width: 0; }
 
+/* 已有数据：按行程折叠 */
+.list-toolbar { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.trip-group-card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  margin-bottom: 10px; box-shadow: var(--shadow); overflow: hidden;
+}
+.trip-group-head {
+  display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px;
+  cursor: pointer; user-select: none;
+}
+.trip-group-head:hover { background: var(--btn-hover); }
+.tg-chevron { flex: 0 0 auto; width: 16px; text-align: center; color: var(--muted); font-size: 14px; line-height: 20px; }
+.tg-head-main { flex: 1; min-width: 0; }
+.tg-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tg-title { font-weight: 700; font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tg-actions { display: flex; gap: 4px; margin-left: auto; }
+.tg-meta { color: var(--muted); font-size: 12px; margin-top: 2px; word-break: break-word; }
+.trip-group-body { padding: 0 12px 10px; border-top: 1px dashed var(--border); }
+.trip-group-body[hidden] { display: none; }
+.tg-section-title { font-size: 12px; color: var(--muted); margin: 10px 0 2px; }
+.tg-item {
+  display: flex; flex-direction: column; align-items: stretch; gap: 4px;
+  padding: 8px 0; border-top: 1px dashed var(--border); font-size: 13px;
+}
+.tg-section-title + .tg-item { border-top: none; }
+.tg-item .txt { min-width: 0; word-break: break-word; }
+.tg-item .txt b { font-weight: 600; }
+.tg-ops { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+@media (max-width: 600px) {
+  .tg-ops { justify-content: flex-start; }
+}
+
 /* 设置 */
 .settings-card .settings-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 

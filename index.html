@@ -205,14 +205,14 @@
         <button type="button" class="ghost" data-form-clear="leg">清空</button>
       </form>
 
-      <h3 class="card-title">已有数据（可删除）</h3>
+      <h3 class="card-title">已有数据</h3>
+      <p class="hint">点行程标题可折叠/展开；城市、到访和交通段都收在对应行程下面。</p>
       <div id="data-lists">
-        <h4 class="list-subtitle">行程 Trip</h4>
-        <div id="list-trips" class="list-block"></div>
-        <h4 class="list-subtitle">城市</h4>
-        <div id="list-stops" class="list-block"></div>
-        <h4 class="list-subtitle">交通段 Leg</h4>
-        <div id="list-legs" class="list-block"></div>
+        <div class="list-toolbar">
+          <button type="button" class="small ghost" data-expand-all>全部展开</button>
+          <button type="button" class="small ghost" data-collapse-all>全部收起</button>
+        </div>
+        <div id="list-groups"></div>
       </div>
     </div>
   </section>

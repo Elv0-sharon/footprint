@@ -1102,73 +1102,124 @@ function syncReturnBtn() {
   btn.disabled = !(_editingLegId && _legDirty);
 }
 
+/* ===== 已有数据：按行程折叠（城市/到访 + 交通段收在行程下面） ===== */
+const TRIP_EXPAND_PREFIX = 'footprint-trip-expanded:';
+function isTripExpanded(id) {
+  try { return localStorage.getItem(TRIP_EXPAND_PREFIX + id) === '1'; }
+  catch (e) { return false; }
+}
+function setTripExpanded(id, expanded) {
+  try { localStorage.setItem(TRIP_EXPAND_PREFIX + id, expanded ? '1' : '0'); }
+  catch (e) { /* 忽略本地存储失败 */ }
+}
+function setAllTripGroups(expanded) {
+  TRIPS.forEach(t => setTripExpanded(t.id, expanded));
+  setTripExpanded('__orphan__', expanded);
+  renderLists();
+}
+function listStopRow(s) {
+  return `<div class="tg-item">`
+    + `<span class="txt"><b>📍 ${esc(stopVisitLabel(s))}</b>`
+    + `<div class="sub">${fmt(s.region || s.city)}｜${s.lat}, ${s.lng}｜📷 ${photoCount(s.id)}</div>`
+    + `<div class="sub">${fmt(s.arriveDate)}${s.leaveDate ? ' ~ ' + fmt(s.leaveDate) : ''}｜${money(s.cost)}${s.mood ? '｜心情 ' + esc(s.mood) : ''}${s.companions ? '｜同行 ' + esc(s.companions) : ''}</div>`
+    + (s.note ? `<div class="sub">${esc(s.note)}</div>` : '')
+    + `</span><span class="tg-ops">`
+    + `<button class="small ghost" data-photos="${s.id}">照片</button>`
+    + `<button class="small ghost" data-revisit="${s.id}">＋再次到访</button>`
+    + `<button class="small ghost" data-edit="stop" data-id="${s.id}">编辑</button>`
+    + `<button class="small" data-del="stop" data-id="${s.id}">删除</button>`
+    + `</span></div>`;
+}
+function listLegRow(l) {
+  const st = legStyle(l.mode);
+  const meta = [legTimeLine(l), l.cost == null ? '' : money(l.cost)].filter(Boolean).join('｜') || '—';
+  return `<div class="tg-item">`
+    + `<span class="txt"><b>${st.icon} ${st.label}</b>：${esc(legEndpointLabel(l, 'from'))} → ${esc(legEndpointLabel(l, 'to'))}`
+    + `<div class="sub">${meta}</div>`
+    + (l.note ? `<div class="sub">${esc(l.note)}</div>` : '')
+    + `</span><span class="tg-ops">`
+    + `<button class="small ghost" data-edit="leg" data-id="${l.id}">编辑</button>`
+    + `<button class="small" data-del="leg" data-id="${l.id}">删除</button>`
+    + `</span></div>`;
+}
+function tripGroupHtml(trip, stops, legs) {
+  const id = trip ? trip.id : '__orphan__';
+  const expanded = isTripExpanded(id);
+  const uniq = uniqueCityCount(stops);
+  const cityText = stops.length > uniq ? `${uniq} 城市 / ${stops.length} 次到访` : `${uniq} 城市`;
+  const counts = `${cityText} · ${legs.length} 交通段`;
+  const title = trip ? `🧳 ${esc(trip.title)}` : '🗂 未归属行程 / 数据';
+  const meta = trip
+    ? `${fmt(trip.dateStart)}${trip.dateEnd ? ' ~ ' + fmt(trip.dateEnd) : ''}｜${counts}`
+    : counts;
+  const actions = trip
+    ? `<span class="tg-actions"><button class="small ghost" data-edit="trip" data-id="${trip.id}">编辑</button>`
+      + `<button class="small" data-del="trip" data-id="${trip.id}">删除</button></span>`
+    : '';
+  const sortedStops = stops.slice().sort((a, b) =>
+    (a.arriveDate || a.leaveDate || '9999').localeCompare(b.arriveDate || b.leaveDate || '9999')
+    || String(a.id).localeCompare(String(b.id)));
+  const bodyParts = [];
+  if (sortedStops.length) {
+    bodyParts.push(`<div class="tg-section-title">城市 / 到访（${sortedStops.length}）</div>`);
+    bodyParts.push(sortedStops.map(listStopRow).join(''));
+  }
+  if (legs.length) {
+    bodyParts.push(`<div class="tg-section-title">交通段（${legs.length}）</div>`);
+    bodyParts.push(legs.map(listLegRow).join(''));
+  }
+  const body = bodyParts.length
+    ? bodyParts.join('')
+    : '<p class="empty">该行程还没有城市或交通段。</p>';
+  return `<div class="trip-group-card">`
+    + `<div class="trip-group-head${expanded ? ' expanded' : ''}" data-trip-toggle="${esc(id)}">`
+    + `<span class="tg-chevron">${expanded ? '▾' : '▸'}</span>`
+    + `<div class="tg-head-main">`
+    + `<div class="tg-title-row"><span class="tg-title">${title}</span>${actions}</div>`
+    + `<div class="tg-meta">${meta}</div>`
+    + `</div></div>`
+    + `<div class="trip-group-body"${expanded ? '' : ' hidden'}>${body}</div>`
+    + `</div>`;
+}
 function renderLists() {
-  const tEl = document.getElementById('list-trips');
-  const sEl = document.getElementById('list-stops');
-  const lEl = document.getElementById('list-legs');
-  if (!tEl) return;
-  const tripTitle = (id) => { const t = TRIPS.find(x => x.id === id); return t ? t.title : '?'; };
-
-  if (!TRIPS.length) {
-    tEl.innerHTML = '<p class="empty">暂无行程。</p>';
-  } else {
-    tEl.innerHTML = TRIPS.map(t => {
-      const tripStops = STOPS.filter(s => s.tripId === t.id);
-      const uniq = uniqueCityCount(tripStops);
-      const cityText = tripStops.length > uniq ? `${uniq} 城市 / ${tripStops.length} 次到访` : `${uniq} 城市`;
-      const cnt = `${cityText} / ${LEGS.filter(l => l.tripId === t.id).length} 交通段`;
-      return `<div class="data-block"><div class="data-row"><span class="txt"><b>🧳 ${esc(t.title)}</b>`
-        + `<div class="sub">${fmt(t.dateStart)}${t.dateEnd ? ' ~ ' + fmt(t.dateEnd) : ''}｜${cnt}</div>`
-        + (t.note ? `<div class="sub">${esc(t.note)}</div>` : '')
-        + `</span><button class="small ghost" data-edit="trip" data-id="${t.id}">编辑</button> `
-        + `<button class="small" data-del="trip" data-id="${t.id}">删除</button></div></div>`;
-    }).join('');
-  }
-
-  if (!STOPS.length) {
-    sEl.innerHTML = '<p class="empty">暂无城市。</p>';
-  } else {
-    sEl.innerHTML = STOPS.map(s => {
-      return `<div class="data-block"><div class="data-row"><span class="txt"><b>📍 ${esc(stopVisitLabel(s))}</b>`
-        + `<div class="sub">${fmt(s.region || s.city)}｜${esc(tripTitle(s.tripId))}｜📷 ${photoCount(s.id)}</div>`
-        + `<div class="sub">${s.lat}, ${s.lng}｜${fmt(s.arriveDate)}${s.leaveDate ? ' ~ ' + fmt(s.leaveDate) : ''}｜${money(s.cost)}</div>`
-        + `</span><span><button class="small ghost" data-photos="${s.id}">管理照片</button> `
-        + `<button class="small ghost" data-revisit="${s.id}">＋ 再次到访</button> `
-        + `<button class="small ghost" data-edit="stop" data-id="${s.id}">编辑</button> `
-        + `<button class="small" data-del="stop" data-id="${s.id}">删除</button></span></div></div>`;
-    }).join('');
-  }
-
-  if (!LEGS.length) {
-    lEl.innerHTML = '<p class="empty">暂无交通段。</p>';
-  } else {
-    // 按旅程分组：行程新的排上面（时间久远的往下放），组内按出发时间从早到晚
-    const byTrip = new Map();
-    LEGS.forEach(l => {
-      const k = l.tripId || '__none';
-      if (!byTrip.has(k)) byTrip.set(k, []);
-      byTrip.get(k).push(l);
-    });
-    const tripEndDate = id => {
-      const t = TRIPS.find(x => x.id === id);
-      return (t && (t.dateEnd || t.dateStart)) || '';
-    };
-    const groups = [...byTrip.entries()].sort((a, b) => tripEndDate(b[0]).localeCompare(tripEndDate(a[0])));
-    lEl.innerHTML = groups.map(([tid, legs]) => {
-      legs.sort((a, b) => (a.departAt || '9999').localeCompare(b.departAt || '9999'));
-      const t = TRIPS.find(x => x.id === tid);
-      const head = t
-        ? `<div class="card-title">🧳 ${esc(t.title)}${(t.dateStart || t.dateEnd) ? `　<span class="sub">${fmt(t.dateStart)}${t.dateEnd ? ' ~ ' + fmt(t.dateEnd) : ''}</span>` : ''}</div>`
-        : '<div class="card-title">未归属行程</div>';
-      return head + legs.map(l => {
-        const st = legStyle(l.mode);
-        return `<div class="data-block"><div class="data-row"><span class="txt"><b>${st.icon} ${st.label}</b>`
-          + `<div class="sub">${esc(legEndpointLabel(l, 'from'))} → ${esc(legEndpointLabel(l, 'to'))}｜${[legTimeLine(l), l.cost == null ? '' : money(l.cost)].filter(Boolean).join('｜')}</div>`
-          + `</span><button class="small ghost" data-edit="leg" data-id="${l.id}">编辑</button> `
-          + `<button class="small" data-del="leg" data-id="${l.id}">删除</button></div></div>`;
-      }).join('');
-    }).join('');
-  }
+  const el = document.getElementById('list-groups');
+  if (!el) return;
+  const tripIds = new Set(TRIPS.map(t => t.id));
+  const trips = [...TRIPS].sort((a, b) =>
+    (b.dateEnd || b.dateStart || '').localeCompare(a.dateEnd || a.dateStart || '')
+    || String(a.title || '').localeCompare(String(b.title || '')));
+  const groups = trips.map(t => {
+    const stops = STOPS.filter(s => s.tripId === t.id);
+    const legs = orderedTripLegs(t.id);   // 与时间线/播放保持同一顺序
+    return tripGroupHtml(t, stops, legs);
+  });
+  const orphanStops = STOPS.filter(s => !s.tripId || !tripIds.has(s.tripId))
+    .sort((a, b) => (a.arriveDate || '9999').localeCompare(b.arriveDate || '9999'));
+  const orphanLegs = LEGS.filter(l => !l.tripId || !tripIds.has(l.tripId))
+    .sort((a, b) => (a.departAt || '9999').localeCompare(b.departAt || '9999'));
+  if (orphanStops.length || orphanLegs.length) groups.push(tripGroupHtml(null, orphanStops, orphanLegs));
+  el.innerHTML = groups.length ? groups.join('') : '<p class="empty">暂无行程，先去上方新增吧。</p>';
+}
+function bindListGroups() {
+  const el = document.getElementById('data-lists');
+  if (!el || el._groupBound) return;
+  el._groupBound = true;
+  el.addEventListener('click', (e) => {
+    if (e.target.closest('[data-expand-all]')) { setAllTripGroups(true); return; }
+    if (e.target.closest('[data-collapse-all]')) { setAllTripGroups(false); return; }
+    const head = e.target.closest('[data-trip-toggle]');
+    if (!head || e.target.closest('button') || e.target.closest('.tg-actions')) return;
+    const id = head.dataset.tripToggle;
+    const group = head.closest('.trip-group-card');
+    const body = group && group.querySelector('.trip-group-body');
+    if (!body) return;
+    const expand = body.hidden;
+    body.hidden = !expand;
+    head.classList.toggle('expanded', expand);
+    const chev = head.querySelector('.tg-chevron');
+    if (chev) chev.textContent = expand ? '▾' : '▸';
+    setTripExpanded(id, expand);
+  });
 }
 
 /* ===== 心情日记 ===== */
@@ -2523,6 +2574,7 @@ function bindForms() {
     const trip = { id: _editingTripId || uid(), title: f.title.value.trim(), dateStart: f.dateStart.value, dateEnd: f.dateEnd.value, note: f.note.value.trim() };
     if (!trip.title) return;
     await DB.putTrip(trip);
+    setTripExpanded(trip.id, true);   // 保存后自动展开该行程，方便继续添加
     if (wasEditing) exitEditMode('trip'); else f.reset();
     await reload(); toast(wasEditing ? '行程已更新' : '行程已保存');
   });
@@ -2598,6 +2650,7 @@ function bindForms() {
       id: uid(), tripId: f.tripId.value, from: fe, to: te, mode: f.mode.value,
       departAt: '', arriveAt: '', cost: null, note: '',
     });
+    setTripExpanded(f.tripId.value, true);
     await reload();
     toast('已添加返程段');
   });
@@ -2650,6 +2703,7 @@ function bindForms() {
       }
     }
     await DB.putStop(stop);
+    if (stop.tripId) setTripExpanded(stop.tripId, true);   // 保存后自动展开所属行程
     // 自动写入点亮集合（省 + 城市）
     if (stop.country === '中国') {
       if (stop.region) {
@@ -2726,6 +2780,7 @@ async function autoChainLeg(stop) {
     };
     if (!leg.tripId) { toast('请选择行程'); return; }
     await DB.putLeg(leg);
+    if (leg.tripId) setTripExpanded(leg.tripId, true);   // 保存后自动展开所属行程
     if (wasEditing) exitEditMode('leg'); else resetLegForm();
     await reload(); toast(wasEditing ? '交通段已更新' : '交通段已保存');
   });
@@ -3342,7 +3397,7 @@ function bindSettings() {
 /* ===== 启动 ===== */
 (async function init() {
   initTheme();
-  bindDrawers(); bindForms(); bindSettings(); bindKeyboard(); bindPhotos(); bindWish(); bindPlay(); bindTimelineDrag();
+  bindDrawers(); bindForms(); bindSettings(); bindKeyboard(); bindPhotos(); bindWish(); bindPlay(); bindTimelineDrag(); bindListGroups();
   // 游客模式：无论是否登录都直接启动（未登录数据走本地 IndexedDB）
   window.startApp = async function () {
     if (window._appStarted) return null;
