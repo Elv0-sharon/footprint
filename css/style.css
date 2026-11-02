@@ -380,7 +380,21 @@ button.small.ghost:hover { background: var(--btn-hover); }
 
 /* 站点圆点 divIcon + 封面小图（叠在圆点上方，zoom>=9 显示） */
 .fp-marker-icon { background: transparent; border: none; }
-.fp-marker { display: flex; flex-direction: column; align-items: center; }
+.fp-marker { display: flex; flex-direction: column; align-items: center; position: relative; }
+/* 同一城市多次到访：标记右上角显示次数 */
+.fp-visit-badge {
+  position: absolute; top: -12px; right: -16px;
+  padding: 2px 5px; border-radius: 999px; font-size: 10px; line-height: 1.2;
+  background: var(--accent); color: var(--on-accent);
+  border: 1px solid var(--card); white-space: nowrap; pointer-events: none;
+}
+/* 列表/时间线里的“第 N 次”小标签 */
+.visit-badge {
+  display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 999px;
+  font-size: 10px; font-weight: 600; line-height: 1.4;
+  background: var(--accent); color: var(--on-accent); vertical-align: 1px;
+}
+.visit-block-sep { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
 .fp-cover {
   width: 40px; height: 40px; border-radius: 10px; overflow: hidden;
   border: 2px solid var(--card); box-shadow: var(--shadow); background: var(--thumb-bg);

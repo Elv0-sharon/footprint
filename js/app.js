@@ -167,6 +167,70 @@ function toast(msg) {
 function normProv(s) { return (s || '').replace(/(省|市|自治区|特别行政区)$/, ''); }
 function normCity(s) { return (s || '').replace(/(市|地区|自治州|盟|林区|旗)$/, ''); }
 
+/* ===== 多次到访：同一行程里的同名城市各算一次独立到访 =====
+   每次到访就是一条独立 Stop：各自的日期、同行者、心情、花费、备注和照片；
+   交通段通过 stopId 指向“哪一次到访”。这里只负责生成可区分的编号/标签。 */
+function cityVisitList(s) {
+  if (!s) return [];
+  const key = normCity(s.city || s.nameZh);
+  return STOPS.filter(x => x.tripId === s.tripId && normCity(x.city || x.nameZh) === key)
+    .sort((a, b) =>
+      (a.arriveDate || a.leaveDate || '9999').localeCompare(b.arriveDate || b.leaveDate || '9999')
+      || String(a.id).localeCompare(String(b.id)));
+}
+function stopVisitInfo(s) {
+  const list = cityVisitList(s);
+  const idx = list.findIndex(x => x.id === s.id);
+  return { no: Math.max(1, idx + 1), total: list.length, list };
+}
+function stopDateText(s) {
+  if (!s) return '';
+  if (s.arriveDate && s.leaveDate && s.leaveDate !== s.arriveDate) return `${s.arriveDate}~${s.leaveDate}`;
+  return s.arriveDate || s.leaveDate || '';
+}
+function stopVisitLabel(s) {
+  if (!s) return '';
+  const { no, total } = stopVisitInfo(s);
+  const parts = [s.nameZh || ''];
+  if (total > 1) parts.push(`第${no}次`);
+  const d = stopDateText(s);
+  if (d) parts.push(d);
+  return parts.filter(Boolean).join(' · ');
+}
+function stopVisitBadge(s) {
+  const { no, total } = stopVisitInfo(s);
+  return total > 1 ? ` <span class="visit-badge">第${no}次</span>` : '';
+}
+function stopVisitShort(s) {
+  if (!s) return '';
+  const { no, total } = stopVisitInfo(s);
+  return (s.nameZh || '') + (total > 1 ? `·第${no}次` : '');
+}
+// 去重后的城市数（多次到访只算一个城市）
+function uniqueCityCount(list) {
+  return new Set((list || STOPS).map(s => normCity(s.city || s.nameZh))).size;
+}
+// 交通段端点文字：stop 端点优先显示“城市·第N次·日期”，避免同名城市选错
+function legEndpointLabel(leg, end) {
+  const e = leg && leg[end];
+  if (e && e.kind === 'stop' && e.stopId) {
+    const s = stopById(e.stopId);
+    if (s) return stopVisitLabel(s);
+  }
+  const r = legEndpoint(leg, end);
+  return r ? r.name : '?';
+}
+// 播放状态栏空间有限：端点只显示“城市·第N次”，完整日期留给抵达停留状态
+function legEndpointShortLabel(leg, end) {
+  const e = leg && leg[end];
+  if (e && e.kind === 'stop' && e.stopId) {
+    const s = stopById(e.stopId);
+    if (s) return stopVisitShort(s);
+  }
+  const r = legEndpoint(leg, end);
+  return r ? r.name : '?';
+}
+
 /* ===== 点亮判定（手动集合 ∪ 已有 Stop） ===== */
 function provinceHighlighted(provName) {
   const n = normProv(provName);
@@ -204,7 +268,7 @@ async function loadAll() {
   }));
   const hc = await DB.getConfig('homeCity');
   if (hc && hc.name) HOME_CITY = { name: hc.name, lat: Number(hc.lat), lng: Number(hc.lng) };
-  return { trips: TRIPS.length, stops: STOPS.length, legs: LEGS.length, diaries: DIARIES.length, wish: WISHES.length };
+  return { trips: TRIPS.length, cities: uniqueCityCount(), stops: STOPS.length, legs: LEGS.length, diaries: DIARIES.length, wish: WISHES.length };
 }
 async function reload() {
   await loadAll();
@@ -449,40 +513,57 @@ function renderMap() {
         const g = geom.get(leg.id);
         if (!g) return;
         const { A, B, ctrl, pts } = g;
-        const pa = legEndpoint(leg, 'from'), pb = legEndpoint(leg, 'to');
         const st = legStyle(leg.mode);
         const tp = legTimePopup(leg);
         L.polyline(pts, { color: st.color, weight: 2, opacity: 0.9 })
-          .bindPopup(`<b>${st.icon} ${st.label}</b><br>${esc(pa.name)} → ${esc(pb.name)}${tp ? '<br>' + tp : ''}<br>花费: ${money(leg.cost)}`)
+          .bindPopup(`<b>${st.icon} ${st.label}</b><br>${esc(legEndpointLabel(leg, 'from'))} → ${esc(legEndpointLabel(leg, 'to'))}${tp ? '<br>' + tp : ''}<br>花费: ${money(leg.cost)}`)
           .addTo(_legGroup);
         legArrow(A, B, ctrl, st.color);   // 线段中部方向箭头，指向 to 端
       });
     }
   }
   _stopMarkers = new Map();
+  // 同一坐标的多次到访合并成一个标记：弹窗里逐次列出，避免完全重叠导致只点得到最后一次
+  const markerGroups = new Map();
   STOPS.forEach(s => {
-    const color = s.markerColor || DEFAULT_MARKER_COLOR;
-    const coverUrl = s.coverPhotoId ? (_coverUrls.get(s.coverPhotoId) || null) : null;
+    const lat = Number(s.lat), lng = Number(s.lng);
+    const key = (isFinite(lat) && isFinite(lng)) ? lat.toFixed(3) + ',' + lng.toFixed(3) : 'id:' + s.id;
+    if (!markerGroups.has(key)) markerGroups.set(key, []);
+    markerGroups.get(key).push(s);
+  });
+  markerGroups.forEach(group => {
+    const visits = group.slice().sort((a, b) =>
+      (a.arriveDate || a.leaveDate || '9999').localeCompare(b.arriveDate || b.leaveDate || '9999')
+      || String(a.id).localeCompare(String(b.id)));
+    const rep = visits[visits.length - 1];   // 最新一次到访代表颜色
+    const coverRep = visits.slice().reverse().find(s => s.coverPhotoId && _coverUrls.get(s.coverPhotoId)) || null;
+    const color = rep.markerColor || DEFAULT_MARKER_COLOR;
+    const coverUrl = coverRep ? _coverUrls.get(coverRep.coverPhotoId) : null;
+    const multi = visits.length > 1;
+    const badge = multi ? `<div class="fp-visit-badge">${visits.length}次</div>` : '';
     let html, iconSize;
     if (coverUrl) {
-      html = `<div class="fp-marker"><div class="fp-cover" title="点击查看照片"><img src="${coverUrl}" alt=""></div>`
-        + `<div class="fp-dot" style="background:${color}"></div></div>`;
+      html = `<div class="fp-marker"><div class="fp-cover" title="${multi ? '点击查看到访记录与照片' : '点击查看照片'}"><img src="${coverUrl}" alt=""></div>`
+        + `<div class="fp-dot" style="background:${color}"></div>${badge}</div>`;
       iconSize = [56, 60];
     } else {
-      html = `<div class="fp-marker"><div class="fp-dot" style="background:${color}"></div></div>`;
+      html = `<div class="fp-marker"><div class="fp-dot" style="background:${color}"></div>${badge}</div>`;
       iconSize = [56, 16];
     }
-    const marker = L.marker([s.lat, s.lng], {
+    const marker = L.marker([Number(rep.lat), Number(rep.lng)], {
       icon: L.divIcon({ className: 'fp-marker-icon', html, iconSize, iconAnchor: [Math.round(iconSize[0] / 2), iconSize[1] - 1] }),
       keyboard: false,
     });
-    if (coverUrl) {
-      marker.on('click', () => openCarousel(s.id));   // 有封面城市：点击封面/圆点 → 全屏轮播（封面第一张）
+    if (multi) {
+      marker._visits = visits;
+      marker.bindPopup(() => visitsPopupHtml(visits));
+    } else if (coverUrl) {
+      marker.on('click', () => openCarousel(coverRep.id));   // 有封面城市：点击封面/圆点 → 全屏轮播（封面第一张）
     } else {
-      marker.bindPopup(() => stopPopupHtml(s));       // 无封面城市：点击圆点 → 信息卡片
+      marker.bindPopup(() => stopPopupHtml(rep));       // 无封面城市：点击圆点 → 信息卡片
     }
     marker.addTo(layerGroup);
-    _stopMarkers.set(s.id, marker);
+    visits.forEach(s => _stopMarkers.set(s.id, marker));
   });
   // 常驻城市：自动生成一个 🏠 标记点，像普通城市一样可点击（与已有城市点重合时不重复画）
   if (HOME_CITY && HOME_CITY.lat != null && HOME_CITY.lng != null) {
@@ -505,7 +586,8 @@ function renderMap() {
 }
 
 // 弹窗内容函数化：每次打开都取最新的日记摘要、照片数与颜色选中态
-function stopPopupHtml(s) {
+// titleOverride 用于“多次到访”合并弹窗里的分节标题（第 N 次 · 日期）
+function stopPopupHtml(s, titleOverride) {
   const linked = DIARIES.filter(d => d.stopId === s.id).slice(0, 3);
   const diaryHtml = linked.length
     ? '<br>📔 ' + linked.map(d => `${fmt(d.date)} ${esc(d.mood || '')} ${esc((d.note || '').slice(0, 20))}`).join('<br>📔 ')
@@ -526,14 +608,31 @@ function stopPopupHtml(s) {
   const trip = TRIPS.find(t => t.id === s.tripId);
   if (trip && trip.title) rows.push('🧳 行程: ' + esc(trip.title));
   if (s.note) rows.push('📝 ' + esc(s.note));
-  const infoHtml = rows.length ? '<br>' + rows.join('<br>') : '';
-  return `<b>${esc(s.nameZh)}${s.nameEn ? ' / ' + esc(s.nameEn) : ''}</b><br>`
-    + `${fmt(s.arriveDate)}${s.leaveDate ? ' ~ ' + fmt(s.leaveDate) : ''}`
-    + `${infoHtml}${diaryHtml}`
+  const title = titleOverride
+    ? `<b>${esc(titleOverride)}</b>`
+    : `<b>${esc(s.nameZh)}${s.nameEn ? ' / ' + esc(s.nameEn) : ''}</b>${stopVisitBadge(s)}`;
+  const lines = [title];
+  if (!titleOverride) lines.push(`${fmt(s.arriveDate)}${s.leaveDate ? ' ~ ' + fmt(s.leaveDate) : ''}`);
+  if (rows.length) lines.push(rows.join('<br>'));
+  return `${lines.join('<br>')}${diaryHtml}`
     + `<br><button class="link-btn" data-photos="${s.id}">📷 照片（${photoCount(s.id)}）</button>`
     + `<div class="swatch-row" style="margin-top:6px;">${swatches}</div>`;
 }
 
+// 同一坐标的多次到访：合并成一个标记，弹窗里逐次列出（各自照片/心情/同行者互不影响）
+function visitsPopupHtml(list) {
+  const visits = list.slice().sort((a, b) =>
+    (a.arriveDate || a.leaveDate || '9999').localeCompare(b.arriveDate || b.leaveDate || '9999')
+    || String(a.id).localeCompare(String(b.id)));
+  const name = visits[0] ? visits[0].nameZh : '城市';
+  return `<b>${esc(name)}</b> · ${visits.length} 次到访`
+    + visits.map((s, i) => {
+      const d = stopDateText(s);
+      return `<div class="visit-block${i ? ' visit-block-sep' : ''}">`
+        + stopPopupHtml(s, `第 ${i + 1} 次${d ? ' · ' + d : ''}`)
+        + `</div>`;
+    }).join('');
+}
 // 弹窗内按钮绑定（照片入口 + 圆点改色），popupopen 与 setPopupContent 后都要调用
 function bindPopupActions(root) {
   root.querySelectorAll('[data-photos]').forEach(b =>
@@ -548,7 +647,7 @@ function bindPopupActions(root) {
       if (m) {
         const el = m.getElement();
         if (el) { const dot = el.querySelector('.fp-dot'); if (dot) dot.style.background = st.markerColor; }
-        m.setPopupContent(stopPopupHtml(st));
+        m.setPopupContent(m._visits ? visitsPopupHtml(m._visits) : stopPopupHtml(st));
         const pe = m.getPopup() && m.getPopup().getElement();
         if (pe) bindPopupActions(pe);
       }
@@ -780,16 +879,15 @@ async function toggleCity(feature) {
 // 这条规则同时覆盖手动排序：默认顺序由交通段顺序推导，拖动后以保存的顺序为准。
 function timelineStopItem(s) {
   return { key: 's:' + s.id, html:
-    `<div class="tl-icon">📍</div><div class="tl-body"><b>${esc(s.nameZh)}</b>`
+    `<div class="tl-icon">📍</div><div class="tl-body"><b>${esc(s.nameZh)}</b>${stopVisitBadge(s)}`
     + `<div class="sub">${fmt(s.arriveDate)}${s.leaveDate ? ' ~ ' + fmt(s.leaveDate) : ''}｜心情 ${fmt(s.mood)}｜${money(s.cost)}</div>`
     + (s.note ? `<div class="sub">${esc(s.note)}</div>` : '') + `</div>` };
 }
 function timelineLegItem(l) {
-  const pa = legEndpoint(l, 'from'), pb = legEndpoint(l, 'to');
   const st = legStyle(l.mode);
   const meta = [legTimeLine(l), l.cost == null ? '' : money(l.cost)].filter(Boolean).join('｜');
   return { key: 'l:' + l.id, html:
-    `<div class="tl-icon">${st.icon}</div><div class="tl-body"><b>${st.label}</b>：${pa ? esc(pa.name) : '?'} → ${pb ? esc(pb.name) : '?'}`
+    `<div class="tl-icon">${st.icon}</div><div class="tl-body"><b>${st.label}</b>：${esc(legEndpointLabel(l, 'from'))} → ${esc(legEndpointLabel(l, 'to'))}`
     + `<div class="sub">${meta}</div>`
     + (l.note ? `<div class="sub">${esc(l.note)}</div>` : '') + `</div>` };
 }
@@ -833,7 +931,10 @@ function renderTimeline() {
     const body = ordered.length
       ? ordered.map(i => `<div class="tl-item" draggable="true" data-key="${i.key}" title="拖动可调整顺序">${i.html}</div>`).join('')
       : '<p class="empty">该行程暂无交通段；城市会显示在抵达它的交通段前面。</p>';
-    const meta = `${fmt(trip.dateStart)}${trip.dateEnd ? ' ~ ' + fmt(trip.dateEnd) : ''}｜${STOPS.filter(s=>s.tripId===trip.id).length} 城市 / ${LEGS.filter(l=>l.tripId===trip.id).length} 交通段`;
+    const tripStops = STOPS.filter(s => s.tripId === trip.id);
+    const uniqCities = uniqueCityCount(tripStops);
+    const cityText = tripStops.length > uniqCities ? `${uniqCities} 城市 / ${tripStops.length} 次到访` : `${uniqCities} 城市`;
+    const meta = `${fmt(trip.dateStart)}${trip.dateEnd ? ' ~ ' + fmt(trip.dateEnd) : ''}｜${cityText} / ${LEGS.filter(l=>l.tripId===trip.id).length} 交通段`;
     return `<div class="trip-group" data-trip-id="${esc(trip.id)}"><div class="trip-title">${esc(trip.title)}</div>`
       + `<div class="trip-meta">${meta}</div>${body}</div>`;
   }).join('');
@@ -902,7 +1003,7 @@ function bindTimelineDrag() {
 /* ===== 录入下拉 & 数据列表 ===== */
 function refreshSelects() {
   const tripOptions = TRIPS.map(t => `<option value="${t.id}">${esc(t.title)}</option>`).join('');
-  const stopOptions = STOPS.map(s => `<option value="${s.id}">${esc(s.nameZh)}（${esc(s.city || s.region || '?')}）</option>`).join('');
+  const stopOptions = STOPS.map(s => `<option value="${s.id}">${esc(stopVisitLabel(s))}（${esc(s.city || s.region || '?')}）</option>`).join('');
 
   const tripReq = tripOptions || '<option value="" disabled>请先添加行程</option>';
   // 重新灌选项时保留当前选中行程：编辑既有交通段/城市时，后台 reload 不能把表单打回第一个行程；
@@ -949,12 +1050,13 @@ function refreshSelects() {
   if (dStop) dStop.innerHTML = '<option value="">不关联城市</option>' + stopOptions;
 
   updateLegManualVisibility();
+  updateStopVisitHint();
   // 城市预设改为可搜索选择器（initCityPicker），不再用下拉注入
 }
 
 // Leg 起止城市选项：第一组常驻城市置顶，第二组全部已有城市，末尾手动输入兜底
 function legCityOptions() {
-  const stopOpts = STOPS.map(s => `<option value="${s.id}">${esc(s.nameZh)}（${esc(s.city || s.region || '?')}）</option>`).join('');
+  const stopOpts = STOPS.map(s => `<option value="${s.id}">${esc(stopVisitLabel(s))}（${esc(s.city || s.region || '?')}）</option>`).join('');
   return `<optgroup label="🏠 常驻城市"><option value="home">🏠 ${esc(HOME_CITY.name)}（常驻）</option></optgroup>`
     + `<optgroup label="📍 已有城市">${stopOpts || '<option value="" disabled>暂无城市，可手动输入</option>'}</optgroup>`
     + `<option value="__manual">✍️ 手动输入城市…</option>`;
@@ -1011,7 +1113,10 @@ function renderLists() {
     tEl.innerHTML = '<p class="empty">暂无行程。</p>';
   } else {
     tEl.innerHTML = TRIPS.map(t => {
-      const cnt = `${STOPS.filter(s => s.tripId === t.id).length} 城市 / ${LEGS.filter(l => l.tripId === t.id).length} 交通段`;
+      const tripStops = STOPS.filter(s => s.tripId === t.id);
+      const uniq = uniqueCityCount(tripStops);
+      const cityText = tripStops.length > uniq ? `${uniq} 城市 / ${tripStops.length} 次到访` : `${uniq} 城市`;
+      const cnt = `${cityText} / ${LEGS.filter(l => l.tripId === t.id).length} 交通段`;
       return `<div class="data-block"><div class="data-row"><span class="txt"><b>🧳 ${esc(t.title)}</b>`
         + `<div class="sub">${fmt(t.dateStart)}${t.dateEnd ? ' ~ ' + fmt(t.dateEnd) : ''}｜${cnt}</div>`
         + (t.note ? `<div class="sub">${esc(t.note)}</div>` : '')
@@ -1024,10 +1129,11 @@ function renderLists() {
     sEl.innerHTML = '<p class="empty">暂无城市。</p>';
   } else {
     sEl.innerHTML = STOPS.map(s => {
-      return `<div class="data-block"><div class="data-row"><span class="txt"><b>📍 ${esc(s.nameZh)}</b>`
+      return `<div class="data-block"><div class="data-row"><span class="txt"><b>📍 ${esc(stopVisitLabel(s))}</b>`
         + `<div class="sub">${fmt(s.region || s.city)}｜${esc(tripTitle(s.tripId))}｜📷 ${photoCount(s.id)}</div>`
         + `<div class="sub">${s.lat}, ${s.lng}｜${fmt(s.arriveDate)}${s.leaveDate ? ' ~ ' + fmt(s.leaveDate) : ''}｜${money(s.cost)}</div>`
         + `</span><span><button class="small ghost" data-photos="${s.id}">管理照片</button> `
+        + `<button class="small ghost" data-revisit="${s.id}">＋ 再次到访</button> `
         + `<button class="small ghost" data-edit="stop" data-id="${s.id}">编辑</button> `
         + `<button class="small" data-del="stop" data-id="${s.id}">删除</button></span></div></div>`;
     }).join('');
@@ -1055,10 +1161,9 @@ function renderLists() {
         ? `<div class="card-title">🧳 ${esc(t.title)}${(t.dateStart || t.dateEnd) ? `　<span class="sub">${fmt(t.dateStart)}${t.dateEnd ? ' ~ ' + fmt(t.dateEnd) : ''}</span>` : ''}</div>`
         : '<div class="card-title">未归属行程</div>';
       return head + legs.map(l => {
-        const pa = legEndpoint(l, 'from'), pb = legEndpoint(l, 'to');
         const st = legStyle(l.mode);
         return `<div class="data-block"><div class="data-row"><span class="txt"><b>${st.icon} ${st.label}</b>`
-          + `<div class="sub">${esc(pa ? pa.name : '?')} → ${esc(pb ? pb.name : '?')}｜${[legTimeLine(l), l.cost == null ? '' : money(l.cost)].filter(Boolean).join('｜')}</div>`
+          + `<div class="sub">${esc(legEndpointLabel(l, 'from'))} → ${esc(legEndpointLabel(l, 'to'))}｜${[legTimeLine(l), l.cost == null ? '' : money(l.cost)].filter(Boolean).join('｜')}</div>`
           + `</span><button class="small ghost" data-edit="leg" data-id="${l.id}">编辑</button> `
           + `<button class="small" data-del="leg" data-id="${l.id}">删除</button></div></div>`;
       }).join('');
@@ -1076,7 +1181,7 @@ function renderDiaries() {
   el.innerHTML = sorted.map(d => {
     const trip = d.tripId ? (TRIPS.find(t => t.id === d.tripId) || {}).title : '';
     const stop = d.stopId ? stopById(d.stopId) : null;
-    const link = [trip ? '🧳 ' + esc(trip) : '', stop ? '📍 ' + esc(stop.nameZh) : ''].filter(Boolean).join('｜');
+    const link = [trip ? '🧳 ' + esc(trip) : '', stop ? '📍 ' + esc(stopVisitLabel(stop)) : ''].filter(Boolean).join('｜');
     const note = d.note || '';
     const snippet = esc(note.slice(0, 60)) + (note.length > 60 ? '…' : '');
     return `<div class="data-block diary-item">`
@@ -1128,6 +1233,7 @@ function exitEditMode(kind) {
     document.getElementById('form-stop').reset();
     setStopColorSelection(DEFAULT_MARKER_COLOR);
     clearCityPicker();
+    updateStopVisitHint();
   } else if (kind === 'leg') {
     resetLegForm();
   } else if (kind === 'wish') {
@@ -1170,8 +1276,28 @@ function startEditStop(id) {
   f.companions.value = s.companions || '';
   f.note.value = s.note || '';
   setStopColorSelection(s.markerColor || DEFAULT_MARKER_COLOR);
-  setEditState('stop', s.nameZh);
+  setEditState('stop', stopVisitLabel(s));
+  updateStopVisitHint();
   f.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+// 再次到访：带入城市基本信息，日期/同行人/心情/花费/备注留空，保存后是一条新的独立到访
+function startRevisit(stopId) {
+  const s = STOPS.find(x => x.id === stopId); if (!s) return;
+  exitEditMode('stop');   // 清空表单并退出编辑态
+  const f = document.getElementById('form-stop');
+  if (s.tripId && f.tripId.querySelector(`option[value="${s.tripId}"]`)) f.tripId.value = s.tripId;
+  f.nameZh.value = s.nameZh || '';
+  f.nameEn.value = s.nameEn || '';
+  f.country.value = s.country || '';
+  f.region.value = s.region || '';
+  f.city.value = s.city || '';
+  f.lat.value = s.lat;
+  f.lng.value = s.lng;
+  setStopColorSelection(s.markerColor || DEFAULT_MARKER_COLOR);
+  openDrawer('entry');
+  updateStopVisitHint();
+  f.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  toast(`已带入「${s.nameZh}」的基本信息；保存后会新增一次独立到访`);
 }
 function startEditLeg(id) {
   const l = LEGS.find(x => x.id === id); if (!l) return;
@@ -1240,8 +1366,7 @@ function startEditLeg(id) {
   _legAutoArrive = (l.departAt && l.arriveAt && l.arriveAt === l.departAt) ? l.arriveAt : '';
   f.cost.value = (l.cost == null ? '' : l.cost);
   f.note.value = l.note || '';
-  const pa = legEndpoint(l, 'from'), pb = legEndpoint(l, 'to');
-  setEditState('leg', (pa ? pa.name : '?') + ' → ' + (pb ? pb.name : '?'));
+  setEditState('leg', legEndpointLabel(l, 'from') + ' → ' + legEndpointLabel(l, 'to'));
   _legDirty = false;
   syncReturnBtn();   // 编辑态显示返程按钮（未改动灰显）
   f.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1620,8 +1745,8 @@ function buildPlayPlan(tripId) {
     const f = legPlayEndpoint(leg, 'from'), t = legPlayEndpoint(leg, 'to');
     const st = legStyle(leg.mode);
     const i = segs.length;
-    const fromName = (f && f.name) || (leg.from && leg.from.name) || '出发地';
-    const toName = (t && t.name) || (leg.to && leg.to.name) || '目的地';
+    const fromName = legEndpointShortLabel(leg, 'from') || '出发地';
+    const toName = legEndpointShortLabel(leg, 'to') || '目的地';
     const A = hasCoord(f) ? [Number(f.lat), Number(f.lng)] : null;
     const B = hasCoord(t) ? [Number(t.lat), Number(t.lng)] : null;
 
@@ -1629,7 +1754,9 @@ function buildPlayPlan(tripId) {
     const isHomeDest = !!(t && t.kind === 'home');
     const destStop = (isHomeDest || !t) ? null : STOPS.find(s => s.tripId === tripId && endpointHitsStop(t, s));
     const destName = isHomeDest ? ((HOME_CITY.name || '常驻地') + '（常驻地）')
-      : (destStop ? destStop.nameZh : toName);
+      : (destStop ? stopVisitLabel(destStop) : toName);
+    const destShort = isHomeDest ? ((HOME_CITY.name || '常驻地') + '（常驻地）')
+      : (destStop ? stopVisitShort(destStop) : toName);
     const destPt = (destStop && hasCoord({ lat: destStop.lat, lng: destStop.lng }))
       ? [Number(destStop.lat), Number(destStop.lng)]
       : B;
@@ -1651,15 +1778,15 @@ function buildPlayPlan(tripId) {
       hasLeg: true, legId: leg.id, noMap, pts, ctrl, mode: leg.mode,
       color: st.color, icon: st.icon, label: st.label,
       from: noMap ? null : segA, to: noMap ? null : segB,
-      fromName, toName,
+      fromName, toName: destShort,
       ms: noMap ? NO_MAP_MS : segDuration(segA, segB, leg.mode),
       zoom: destObj ? playZoomFor(lastPt, destObj) : null,
     });
     seq.push({
-      nameZh: destName,
+      nameZh: destName,   // 城市到访标签已含“第 N 次 + 日期”，不再重复显示 arriveDate
       lat: destPt ? destPt[0] : null,
       lng: destPt ? destPt[1] : null,
-      arriveDate: destStop ? (destStop.arriveDate || '') : '',
+      arriveDate: '',
       noCoords: !destPt,
     });
     if (destPt) lastPt = destObj;
@@ -2053,9 +2180,12 @@ function fillPlayDrawer() {
 }
 function updatePlayStats() {
   const tripId = document.getElementById('play-trip').value;
-  const n = STOPS.filter(s => s.tripId === tripId).length;
+  const tripStops = STOPS.filter(s => s.tripId === tripId);
+  const n = tripStops.length;
+  const uniq = uniqueCityCount(tripStops);
   const m = LEGS.filter(l => l.tripId === tripId).length;
-  document.getElementById('play-stats').textContent = `该行程：${n} 个城市 · ${m} 段交通（逐段播放 ${m} 次）`;
+  const cityText = n > uniq ? `${uniq} 个城市 / ${n} 次到访` : `${n} 个城市`;
+  document.getElementById('play-stats').textContent = `该行程：${cityText} · ${m} 段交通（逐段播放 ${m} 次）`;
 }
 // 播放期隐藏业务图层，减少 DOM/绘制；收尾再恢复
 function hideLayersForPlay() {
@@ -2298,6 +2428,21 @@ function clearCityPicker() {
   if (inp) inp.value = '';
   if (list) list.hidden = true;
 }
+// 新增城市时提示：同名城市已有到访 → 保存会新增一次独立到访（日期/同行人/心情/照片各自独立）
+function updateStopVisitHint() {
+  const f = document.getElementById('form-stop');
+  const el = document.getElementById('stop-visit-hint');
+  if (!f || !el) return;
+  if (_editingStopId) { el.hidden = true; return; }
+  const tripId = f.tripId.value;
+  const key = normCity(f.city.value || f.nameZh.value);
+  if (!tripId || !key) { el.hidden = true; return; }
+  const existing = STOPS.filter(s => s.tripId === tripId && normCity(s.city || s.nameZh) === key);
+  if (!existing.length) { el.hidden = true; return; }
+  const name = f.nameZh.value.trim() || f.city.value.trim();
+  el.hidden = false;
+  el.textContent = `该行程已有 ${existing.length} 次「${name}」到访记录；保存会新增一次独立到访，日期、同行人、心情、花费、备注和照片都单独保存。`;
+}
 function initCityPicker() {
   const input = document.getElementById('city-preset-input');
   const list = document.getElementById('city-preset-list');
@@ -2341,6 +2486,7 @@ function initCityPicker() {
     f.nameEn.value = '';
     input.value = c.name;
     list.hidden = true;
+    updateStopVisitHint();
   }
 
   input.addEventListener('focus', () => render(input.value));
@@ -2403,6 +2549,11 @@ function bindForms() {
     stopForm.lng.value = '';
     const inp = document.getElementById('city-preset-input');
     if (inp) inp.value = '';
+    updateStopVisitHint();
+  });
+  ['input', 'change'].forEach(ev => {
+    stopForm.nameZh.addEventListener(ev, updateStopVisitHint);
+    stopForm.city.addEventListener(ev, updateStopVisitHint);
   });
 
   // 城市日期联动：到达日期变化 → 离开日期默认同一天且 min 限制（仍可手动改）
@@ -2481,6 +2632,9 @@ function bindForms() {
       coverPhotoId: oldStop ? (oldStop.coverPhotoId || '') : '',   // 编辑时保留封面照片
     };
     if (!stop.tripId || !TRIPS.some(t => t.id === stop.tripId) || !stop.nameZh) { toast('请选择有效行程并填写名称'); return; }
+    // 同名城市再次到访：保存成一条新的独立记录（日期/同行人/心情/照片互不影响）
+    const visitCount = wasEditing ? 0 : STOPS.filter(x =>
+      x.tripId === stop.tripId && normCity(x.city || x.nameZh) === normCity(stop.city || stop.nameZh)).length;
     // 编辑时同步点亮集合：改名/改国家清旧记录，同名时同步坐标与省份
     if (oldStop) {
       const oldKey = normCity(oldStop.city) || normCity(oldStop.nameZh);
@@ -2514,7 +2668,9 @@ function bindForms() {
     }
     if (wasEditing) exitEditMode('stop');
     else { f.reset(); setStopColorSelection(DEFAULT_MARKER_COLOR); clearCityPicker(); }
-    await reload(); toast(wasEditing ? '城市已更新' : '城市已保存');
+    await reload();
+    toast(wasEditing ? '城市已更新'
+      : (visitCount ? `已新增一次到访：${stop.nameZh}（该行程共 ${visitCount + 1} 次，照片/心情独立）` : '城市已保存'));
     if (!wasEditing) await autoChainLeg(stop);   // 行程内按到达日期自动串联相邻城市
   });
 
@@ -2525,6 +2681,11 @@ async function autoChainLeg(stop) {
   let added = 0, first = null, second = null;
   for (let i = 1; i < list.length; i++) {
     const prev = list[i - 1], cur = list[i];
+    // 同一城市再次到访（同名或同坐标）：不自动生成“西安 → 西安”这种同城段
+    const sameName = normCity(prev.city || prev.nameZh) === normCity(cur.city || cur.nameZh);
+    const sameSpot = Math.abs(Number(prev.lat) - Number(cur.lat)) < 0.01
+      && Math.abs(Number(prev.lng) - Number(cur.lng)) < 0.01;
+    if (sameName || sameSpot) continue;
     const linked = LEGS.some(l => {
       const f = (l.from && l.from.kind === 'stop') ? l.from.stopId : l.fromStopId;
       const t = (l.to && l.to.kind === 'stop') ? l.to.stopId : l.toStopId;
@@ -2569,8 +2730,10 @@ async function autoChainLeg(stop) {
     await reload(); toast(wasEditing ? '交通段已更新' : '交通段已保存');
   });
 
-  // 已有数据：编辑按钮（事件委托）
+  // 已有数据：再次到访 / 编辑按钮（事件委托）
   document.getElementById('data-lists').addEventListener('click', (e) => {
+    const rbtn = e.target.closest('[data-revisit]');
+    if (rbtn) { startRevisit(rbtn.dataset.revisit); return; }
     const ebtn = e.target.closest('[data-edit]');
     if (!ebtn) return;
     const kind = ebtn.dataset.edit, id = ebtn.dataset.id;
@@ -2749,7 +2912,7 @@ function openPhotoDrawer(stopId) {
   if (!stop) { toast('城市不存在'); return; }
   openDrawer('photos');            // 统一状态管理：先 closeAllDrawers 再开自己
   _photoStopId = stopId;
-  document.getElementById('photo-drawer-title').textContent = '📷 ' + stop.nameZh;
+  document.getElementById('photo-drawer-title').textContent = '📷 ' + stopVisitLabel(stop);
   renderPhotoGrid();
 }
 
@@ -2842,7 +3005,7 @@ async function openCarousel(stopId) {
   _pcUrls = photos.map(p => URL.createObjectURL(p.blob));
   renderCarousel(0);
   document.getElementById('pc-title').textContent =
-    stop.nameZh + (photos[_pcIdx].shootDate ? ' · ' + photos[_pcIdx].shootDate : '');
+    stopVisitLabel(stop) + (photos[_pcIdx].shootDate ? ' · ' + photos[_pcIdx].shootDate : '');
   document.getElementById('photo-carousel').classList.add('open');
   if (map) map.closePopup();
 }
@@ -3014,12 +3177,12 @@ function renderAuthInfo() {
     el.textContent = '👤 当前：游客模式（数据仅存本机浏览器，登录后自动上传云端）';
     return;
   }
-  el.textContent = `👤 已登录 ${window._sbUser.email}｜当前显示：行程 ${TRIPS.length} / 城市 ${STOPS.length} / 交通段 ${LEGS.length} / 日记 ${DIARIES.length} / 心愿 ${WISHES.length}`;
+  el.textContent = `👤 已登录 ${window._sbUser.email}｜当前显示：行程 ${TRIPS.length} / 城市 ${uniqueCityCount()} / 到访 ${STOPS.length} / 交通段 ${LEGS.length} / 日记 ${DIARIES.length} / 心愿 ${WISHES.length}`;
 }
 // 数据统计条 + 备份提醒（距上次导出超过 30 天或从未导出时显示）
 async function renderStats() {
   const el = document.getElementById('stats-bar');
-  if (el) el.textContent = `📊 行程 ${TRIPS.length} ｜ 城市 ${STOPS.length} ｜ 交通段 ${LEGS.length} ｜ 日记 ${DIARIES.length} ｜ 照片 ${_photoIndex.length}`;
+  if (el) el.textContent = `📊 行程 ${TRIPS.length} ｜ 城市 ${uniqueCityCount()} ｜ 到访 ${STOPS.length} ｜ 交通段 ${LEGS.length} ｜ 日记 ${DIARIES.length} ｜ 照片 ${_photoIndex.length}`;
   renderAuthInfo();
   const tip = document.getElementById('backup-tip');
   if (!tip) return;
@@ -3219,7 +3382,7 @@ function bindSettings() {
       try { merged = await window.mergeLocalToCloud(); }   // 游客期间录入的本机数据并入云端
       catch (e) { console.warn('[footprint] 本机数据合并失败：', e); }
       const c = await window.startApp();
-      const cnt = c ? `（云端：行程 ${c.trips} / 城市 ${c.stops} / 交通段 ${c.legs} / 日记 ${c.diaries} / 心愿 ${c.wish}）` : '';
+      const cnt = c ? `（云端：行程 ${c.trips} / 城市 ${c.cities} / 到访 ${c.stops} / 交通段 ${c.legs} / 日记 ${c.diaries} / 心愿 ${c.wish}）` : '';
       const errs = (merged.errors || []).slice(0, 2).join('；');
       toast('已登录，数据已切换为云端同步' + (merged.up ? `，本机记录已上传云端 ${merged.up} 条` : '') + (merged.fail ? `，失败 ${merged.fail} 项（设置里可手动重传）` : '') + (errs ? `｜${errs}` : '') + ' ' + cnt);
       const r = await window.syncAllPhotos();
