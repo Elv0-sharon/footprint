@@ -108,8 +108,8 @@ function mapPalette() {
 
 // 六种交通方式；walk 仅作旧数据兼容渲染，不出现在图例/表单
 const MODE_STYLE = {
-  plane:     { color: '#2F6FED', dash: null, icon: '✈️', label: '飞机' },      // 明亮蓝：远看与绿色高铁线区分
-  highspeed: { color: '#00B36B', dash: null, icon: '🚄', label: '高铁/动车' }, // 鲜亮绿：与飞机蓝、省界墨绿都拉开
+  plane:     { color: '#51719B', dash: '7,5', icon: '✈️', label: '飞机' },     // 低饱和蓝 + 虚线：不刺眼，远看也能和高铁区分
+  highspeed: { color: '#3F8A6C', dash: null, icon: '🚄', label: '高铁/动车' }, // 低饱和绿实线：比省界墨绿略亮，远看仍可辨
   train:     { color: '#8a5a2b', dash: null, icon: '🚞', label: '普速火车' },
   bus:       { color: '#C99A45', dash: null, icon: '🚌', label: '大巴' },
   boat:      { color: '#4a90a4', dash: null, icon: '⛵', label: '轮船' },
@@ -541,7 +541,7 @@ function renderMap() {
         const tp = legTimePopup(leg);
         const trip = TRIPS.find(t => t.id === leg.tripId);
         const tripLine = trip ? `🧳 ${esc(trip.title)}` : '⚠️ 未归属行程（不在任何行程的时间线里）';
-        L.polyline(pts, { color: st.color, weight: 2, opacity: 0.9 })
+        L.polyline(pts, { color: st.color, weight: 2, opacity: 0.9, dashArray: st.dash || null })
           .bindPopup(`<b>${st.icon} ${st.label}</b><br>${esc(legEndpointLabel(leg, 'from'))} → ${esc(legEndpointLabel(leg, 'to'))}${tp ? '<br>' + tp : ''}<br>花费: ${money(leg.cost)}<br>${tripLine}`
             + `<br><button class="link-btn" data-leg-del="${esc(leg.id)}">删除这段交通</button>`)
           .addTo(_legGroup);
@@ -1931,7 +1931,7 @@ function buildPlayPlan(tripId) {
     const destObj = destPt ? { lat: destPt[0], lng: destPt[1] } : null;
     segs.push({
       hasLeg: true, legId: leg.id, noMap, pts, ctrl, mode: leg.mode,
-      color: st.color, icon: st.icon, label: st.label,
+      color: st.color, dash: st.dash, icon: st.icon, label: st.label,
       from: noMap ? null : segA, to: noMap ? null : segB,
       fromName, toName: destShort,
       ms: noMap ? NO_MAP_MS : segDuration(segA, segB, leg.mode),
@@ -2156,7 +2156,7 @@ function enterPlayPhase(phase) {
     prefetchArea(seg.to[0], seg.to[1], st.zoom, 1);
     st.segLine = (seg.pts && seg.pts.length > 1)
       ? L.polyline([seg.pts[0]], {
-          color: seg.color, weight: 3, opacity: 0.95,
+          color: seg.color, weight: 3, opacity: 0.95, dashArray: seg.dash || null,
           lineCap: 'round', lineJoin: 'round',
           interactive: false,
         }).addTo(_playGroup)
