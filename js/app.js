@@ -10,7 +10,8 @@ const _cityGeoCache = new Map();
 let _editingDiaryId = null;
 let _editingTripId = null, _editingStopId = null, _editingLegId = null, _editingWishId = null;
 let _legDirty = false;   // Leg 编辑表单是否有改动（控制"添加返程"按钮可用）
-let _legAutoArrive = ''; // 出发时间自动同步到到达时间的最近一次值（用于识别到达时间是否被手动改过）
+let _legAutoArrive = ''; // 出发日期/时刻自动同步到到达端的最近一次值（用于识别到达端是否被手动改过）
+let _timelineOrders = {}; // tripId -> 手动拖动后的时间线条目顺序（本地 config 持久化）
 
 /* 照片模块状态 */
 let _photoStopId = null, _stopPhotos = [], _thumbUrls = [];
@@ -131,17 +132,30 @@ function uid() {
   return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('id-' + Date.now() + '-' + Math.random().toString(16).slice(2));
 }
 function fmt(v) { return v ? v : '—'; }
+// Leg 时间可能是完整时刻（2024-05-02T08:00）也可能只有日期（2024-05-02）；展示时统一用空格分隔
+function legTimeText(v) { return v ? esc(String(v).replace('T', ' ')) : ''; }
+// 表单拆分：把已存的出发/到达时间拆成“日期 + 可选时刻”
+function splitLegTime(v) {
+  const s = String(v == null ? '' : v).trim();
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/);
+  return m ? [m[1], m[2] || ''] : ['', ''];
+}
+function joinLegTime(date, clock) {
+  return date ? (clock ? date + 'T' + clock : date) : '';
+}
 // Leg 时间片段：仅展示存在的一侧（弹窗版：出发: a　到达: b），两端都空返回空串
 function legTimePopup(leg) {
   const parts = [];
-  if (leg.departAt) parts.push('出发: ' + esc(leg.departAt));
-  if (leg.arriveAt) parts.push('到达: ' + esc(leg.arriveAt));
+  if (leg.departAt) parts.push('出发: ' + legTimeText(leg.departAt));
+  if (leg.arriveAt) parts.push('到达: ' + legTimeText(leg.arriveAt));
   return parts.join('　');
 }
 // Leg 时间片段（时间线/列表版：a 到达 b），两端都空返回空串
 function legTimeLine(leg) {
   if (!leg.departAt && !leg.arriveAt) return '';
-  return (leg.departAt ? esc(leg.departAt) : '') + (leg.arriveAt ? ' 到达 ' + esc(leg.arriveAt) : '');
+  if (leg.departAt && leg.arriveAt) return legTimeText(leg.departAt) + ' 到达 ' + legTimeText(leg.arriveAt);
+  if (leg.departAt) return legTimeText(leg.departAt) + ' 出发';
+  return '到达 ' + legTimeText(leg.arriveAt);
 }
 function money(v) { return (v !== '' && v != null && !isNaN(v)) ? ('¥' + Number(v).toLocaleString()) : '—'; }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
@@ -180,6 +194,14 @@ async function loadAll() {
   VISITED_PROVINCES = await DB.getVisitedProvinces();
   VISITED_CITIES = await DB.getVisitedCities();
   WISHES = await DB.getWishlist();
+  // 时间线手动排序（本机配置，换设备不迁移；新条目仍按默认规则补入）
+  _timelineOrders = {};
+  await Promise.all(TRIPS.map(async t => {
+    try {
+      const rec = await DB.getConfig('timelineOrder:' + t.id);
+      if (rec && Array.isArray(rec.value) && rec.value.length) _timelineOrders[t.id] = rec.value;
+    } catch (e) { /* 忽略单条读取失败 */ }
+  }));
   const hc = await DB.getConfig('homeCity');
   if (hc && hc.name) HOME_CITY = { name: hc.name, lat: Number(hc.lat), lng: Number(hc.lng) };
   return { trips: TRIPS.length, stops: STOPS.length, legs: LEGS.length, diaries: DIARIES.length, wish: WISHES.length };
@@ -754,33 +776,127 @@ async function toggleCity(feature) {
 }
 
 /* ===== 时间线 ===== */
+// 城市条目：只有「有交通段抵达」的城市才显示，并排在抵达它的交通段前面。
+// 这条规则同时覆盖手动排序：默认顺序由交通段顺序推导，拖动后以保存的顺序为准。
+function timelineStopItem(s) {
+  return { key: 's:' + s.id, html:
+    `<div class="tl-icon">📍</div><div class="tl-body"><b>${esc(s.nameZh)}</b>`
+    + `<div class="sub">${fmt(s.arriveDate)}${s.leaveDate ? ' ~ ' + fmt(s.leaveDate) : ''}｜心情 ${fmt(s.mood)}｜${money(s.cost)}</div>`
+    + (s.note ? `<div class="sub">${esc(s.note)}</div>` : '') + `</div>` };
+}
+function timelineLegItem(l) {
+  const pa = legEndpoint(l, 'from'), pb = legEndpoint(l, 'to');
+  const st = legStyle(l.mode);
+  const meta = [legTimeLine(l), l.cost == null ? '' : money(l.cost)].filter(Boolean).join('｜');
+  return { key: 'l:' + l.id, html:
+    `<div class="tl-icon">${st.icon}</div><div class="tl-body"><b>${st.label}</b>：${pa ? esc(pa.name) : '?'} → ${pb ? esc(pb.name) : '?'}`
+    + `<div class="sub">${meta}</div>`
+    + (l.note ? `<div class="sub">${esc(l.note)}</div>` : '') + `</div>` };
+}
+function timelineTripItems(trip) {
+  const stops = STOPS.filter(s => s.tripId === trip.id);
+  const legs = LEGS.filter(l => l.tripId === trip.id)
+    .sort((a, b) => (a.departAt || '9999').localeCompare(b.departAt || '9999') || String(a.id).localeCompare(String(b.id)));
+  // 每条交通段只认一个抵达城市；城市取最早抵达它的那一段作为“锚点”。
+  const anchorLeg = new Map();   // legId -> stop
+  const anchored = new Set();    // 已有抵达段的 stopId
+  for (const leg of legs) {
+    const to = legPlayEndpoint(leg, 'to');
+    if (!to) continue;
+    const hit = stops.find(s => endpointHitsStop(to, s));
+    if (hit && !anchored.has(hit.id)) { anchored.add(hit.id); anchorLeg.set(leg.id, hit); }
+  }
+  const items = [];
+  for (const leg of legs) {
+    const city = anchorLeg.get(leg.id);
+    if (city) items.push(timelineStopItem(city));   // 城市标注在抵达段之前
+    items.push(timelineLegItem(leg));
+  }
+  return items;
+}
 function renderTimeline() {
   const el = document.getElementById('timeline');
   if (!TRIPS.length) { el.innerHTML = '<p class="empty">暂无行程，去「录入」添加吧。</p>'; return; }
   const trips = [...TRIPS].sort((a, b) => (b.dateStart || '').localeCompare(a.dateStart || ''));
   el.innerHTML = trips.map(trip => {
-    const stops = STOPS.filter(s => s.tripId === trip.id)
-      .map(s => ({ type: 'stop', date: s.arriveDate || '9999', html:
-        `<div class="tl-icon">📍</div><div class="tl-body"><b>${esc(s.nameZh)}</b>`
-        + `<div class="sub">${fmt(s.arriveDate)}${s.leaveDate ? ' ~ ' + fmt(s.leaveDate) : ''}｜心情 ${fmt(s.mood)}｜${money(s.cost)}</div>`
-        + (s.note ? `<div class="sub">${esc(s.note)}</div>` : '') + `</div>` }));
-    const legs = LEGS.filter(l => l.tripId === trip.id)
-      .map(l => {
-        const pa = legEndpoint(l, 'from'), pb = legEndpoint(l, 'to');
-        const st = legStyle(l.mode);
-        const meta = [legTimeLine(l), l.cost == null ? '' : money(l.cost)].filter(Boolean).join('｜');
-        return { type: 'leg', date: l.departAt || '9999', html:   // 时间为空的条目排在最后
-          `<div class="tl-icon">${st.icon}</div><div class="tl-body"><b>${st.label}</b>：${pa ? esc(pa.name) : '?'} → ${pb ? esc(pb.name) : '?'}`
-          + `<div class="sub">${meta}</div>`
-          + (l.note ? `<div class="sub">${esc(l.note)}</div>` : '') + `</div>` };
-      });
-    const items = [...stops, ...legs].sort((x, y) => (x.date || '').localeCompare(y.date || ''));
-    const body = items.length ? items.map(i => `<div class="tl-item">${i.html}</div>`).join('')
-                               : '<p class="empty">该行程暂无城市或交通段。</p>';
+    const items = timelineTripItems(trip);
+    // 手动拖动顺序优先；之后新增的条目按默认顺序补在末尾，不会打乱已排好的部分。
+    let ordered = items;
+    const saved = _timelineOrders[trip.id];
+    if (Array.isArray(saved) && saved.length) {
+      const byKey = new Map(items.map(i => [i.key, i]));
+      const seen = new Set();
+      ordered = [];
+      saved.forEach(k => { const it = byKey.get(k); if (it && !seen.has(k)) { seen.add(k); ordered.push(it); } });
+      items.forEach(it => { if (!seen.has(it.key)) ordered.push(it); });
+    }
+    const body = ordered.length
+      ? ordered.map(i => `<div class="tl-item" draggable="true" data-key="${i.key}" title="拖动可调整顺序">${i.html}</div>`).join('')
+      : '<p class="empty">该行程暂无交通段；城市会显示在抵达它的交通段前面。</p>';
     const meta = `${fmt(trip.dateStart)}${trip.dateEnd ? ' ~ ' + fmt(trip.dateEnd) : ''}｜${STOPS.filter(s=>s.tripId===trip.id).length} 城市 / ${LEGS.filter(l=>l.tripId===trip.id).length} 交通段`;
-    return `<div class="trip-group"><div class="trip-title">${esc(trip.title)}</div>`
+    return `<div class="trip-group" data-trip-id="${esc(trip.id)}"><div class="trip-title">${esc(trip.title)}</div>`
       + `<div class="trip-meta">${meta}</div>${body}</div>`;
   }).join('');
+}
+
+/* ---- 时间线拖动排序（桌面端 HTML5 拖放，顺序存本机 config） ---- */
+let _tlDrag = null;
+function clearTimelineDropMarks() {
+  document.querySelectorAll('#timeline .tl-item.drop-before, #timeline .tl-item.drop-after')
+    .forEach(el => el.classList.remove('drop-before', 'drop-after'));
+}
+function bindTimelineDrag() {
+  const el = document.getElementById('timeline');
+  if (!el || el._dragBound) return;
+  el._dragBound = true;
+  el.addEventListener('dragstart', (e) => {
+    const item = e.target.closest('.tl-item');
+    const group = item && item.closest('.trip-group');
+    if (!item || !group) return;
+    _tlDrag = { item, group, tripId: group.dataset.tripId };
+    item.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', item.dataset.key || ''); } catch (err) { /* 忽略 */ }
+  });
+  el.addEventListener('dragover', (e) => {
+    if (!_tlDrag) return;
+    const target = e.target.closest('.tl-item');
+    if (!target || target === _tlDrag.item || target.parentElement !== _tlDrag.group) { clearTimelineDropMarks(); return; }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const rect = target.getBoundingClientRect();
+    const after = e.clientY > rect.top + rect.height / 2;
+    clearTimelineDropMarks();
+    target.classList.add(after ? 'drop-after' : 'drop-before');
+    _tlDrag.target = target;
+    _tlDrag.after = after;
+  });
+  el.addEventListener('drop', async (e) => {
+    if (!_tlDrag) return;
+    e.preventDefault();
+    const { item, group, tripId, target, after } = _tlDrag;
+    if (target && target !== item && target.parentElement === group) {
+      if (after) target.after(item); else target.before(item);
+    }
+    item.classList.remove('dragging');
+    clearTimelineDropMarks();
+    _tlDrag = null;
+    const keys = [...group.querySelectorAll(':scope > .tl-item')].map(x => x.dataset.key).filter(Boolean);
+    if (!keys.length) return;
+    _timelineOrders[tripId] = keys;
+    try {
+      await DB.putConfig({ key: 'timelineOrder:' + tripId, value: keys });
+      toast('时间线顺序已保存');
+    } catch (err) {
+      console.warn('[footprint] 时间线顺序保存失败：', err);
+      toast('顺序保存失败，刷新后会恢复');
+    }
+  });
+  el.addEventListener('dragend', () => {
+    if (_tlDrag && _tlDrag.item) _tlDrag.item.classList.remove('dragging');
+    clearTimelineDropMarks();
+    _tlDrag = null;
+  });
 }
 
 /* ===== 录入下拉 & 数据列表 ===== */
@@ -1114,9 +1230,13 @@ function startEditLeg(id) {
   });
   updateLegManualVisibility();
   f.mode.value = l.mode || 'plane';
-  f.departAt.value = l.departAt || '';
-  f.arriveAt.value = l.arriveAt || '';
-  // 编辑已有段：若到达时间原与出发时间相同，改出发时间时保持两者联动
+  const [depDate, depClock] = splitLegTime(l.departAt);
+  const [arrDate, arrClock] = splitLegTime(l.arriveAt);
+  f.departDate.value = depDate;
+  f.departClock.value = depClock;
+  f.arriveDate.value = arrDate;
+  f.arriveClock.value = arrClock;
+  // 编辑已有段：若到达端原与出发端相同，改出发端时保持两者联动
   _legAutoArrive = (l.departAt && l.arriveAt && l.arriveAt === l.departAt) ? l.arriveAt : '';
   f.cost.value = (l.cost == null ? '' : l.cost);
   f.note.value = l.note || '';
@@ -1756,20 +1876,22 @@ function setPlayStatus(text) {
 // 平移时地图像素位移很快，180ms 一次足够补上新进入视口的瓦片，但能把逐帧开销降一个数量级。
 function throttleTileUpdates() {
   const st = _play;
+  // 关键：Leaflet 注册的监听是 move → layer._onMove（节流版 _onMoveEnd）、moveend → layer._onMoveEnd。
+  // 之前按 layer._update 移除，既移不掉原监听，恢复时又额外绑了一个签名不匹配的 _update：
+  // _update 会把事件对象当成 center 传入，重播时直接抛错，导致第二次播放卡死。
   st.tileLayers = [_tileLight, _tileDark].filter(Boolean).map(layer => {
-    const onMove = !!layer._onMove;
-    if (onMove) map.off('move', layer._onMove, layer);
-    map.off('moveend', layer._update, layer);
-    return { layer, onMove };
+    if (layer._onMove) map.off('move', layer._onMove, layer);
+    if (layer._onMoveEnd) map.off('moveend', layer._onMoveEnd, layer);
+    return { layer };
   });
   st.tileAt = 0;
 }
 function restoreTileUpdates() {
   const st = _play;
   if (!st || !st.tileLayers) return;
-  st.tileLayers.forEach(({ layer, onMove }) => {
-    if (onMove) map.on('move', layer._onMove, layer);
-    map.on('moveend', layer._update, layer);
+  st.tileLayers.forEach(({ layer }) => {
+    if (layer._onMove) map.on('move', layer._onMove, layer);
+    if (layer._onMoveEnd) map.on('moveend', layer._onMoveEnd, layer);
     try { layer._update(); } catch (e) { /* 忽略 */ }
   });
   st.tileLayers = null;
@@ -2371,12 +2493,18 @@ function bindForms() {
   // 编辑态任一字段改动 → "添加返程"变为可点
   legForm.addEventListener('input', () => { if (_editingLegId) { _legDirty = true; syncReturnBtn(); } });
   legForm.addEventListener('change', () => { if (_editingLegId) { _legDirty = true; syncReturnBtn(); } });
-  // 出发时间输入时自动同步到达时间：到达时间为空或仍是上次自动同步值时才覆盖；手动改过的到达时间不吞
-  legForm.departAt.addEventListener('input', () => {
-    if (!legForm.arriveAt.value || legForm.arriveAt.value === _legAutoArrive) {
-      legForm.arriveAt.value = legForm.departAt.value;
-      _legAutoArrive = legForm.arriveAt.value;
+  // 出发日期/时刻变化时自动同步到达端：到达端为空或仍是上次自动同步值时才覆盖；手动改过的到达端不吞
+  const syncLegArrive = () => {
+    const arr = joinLegTime(legForm.arriveDate.value, legForm.arriveClock.value);
+    if (!arr || arr === _legAutoArrive) {
+      legForm.arriveDate.value = legForm.departDate.value;
+      legForm.arriveClock.value = legForm.departClock.value;
+      _legAutoArrive = joinLegTime(legForm.arriveDate.value, legForm.arriveClock.value);
     }
+  };
+  ['input', 'change'].forEach(ev => {
+    legForm.departDate.addEventListener(ev, syncLegArrive);
+    legForm.departClock.addEventListener(ev, syncLegArrive);
   });
   // 添加返程：反向生成一条新 Leg（原段不动），路线名称/时间/花费/备注留空
   document.getElementById('btn-add-return').addEventListener('click', async () => {
@@ -2501,7 +2629,9 @@ async function autoChainLeg(stop) {
     const leg = {
       id: _editingLegId || uid(), tripId: f.tripId.value,
       from: fe, to: te,
-      mode: f.mode.value, departAt: f.departAt.value, arriveAt: f.arriveAt.value,
+      mode: f.mode.value,
+      departAt: joinLegTime(f.departDate.value, f.departClock.value),
+      arriveAt: joinLegTime(f.arriveDate.value, f.arriveClock.value),
       cost: f.cost.value === '' ? null : Number(f.cost.value), note: f.note.value.trim(),
     };
     if (!leg.tripId) { toast('请选择行程'); return; }
@@ -3120,7 +3250,7 @@ function bindSettings() {
 /* ===== 启动 ===== */
 (async function init() {
   initTheme();
-  bindDrawers(); bindForms(); bindSettings(); bindKeyboard(); bindPhotos(); bindWish(); bindPlay();
+  bindDrawers(); bindForms(); bindSettings(); bindKeyboard(); bindPhotos(); bindWish(); bindPlay(); bindTimelineDrag();
   // 游客模式：无论是否登录都直接启动（未登录数据走本地 IndexedDB）
   window.startApp = async function () {
     if (window._appStarted) return null;

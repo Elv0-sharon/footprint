@@ -187,9 +187,14 @@
           </select>
         </label>
         <div class="row">
-          <label>出发时间<input type="datetime-local" name="departAt"></label>
-          <label>到达时间<input type="datetime-local" name="arriveAt"></label>
+          <label>出发日期<input type="date" name="departDate"></label>
+          <label>出发时刻（可空）<input type="time" name="departClock"></label>
         </div>
+        <div class="row">
+          <label>到达日期<input type="date" name="arriveDate"></label>
+          <label>到达时刻（可空）<input type="time" name="arriveClock"></label>
+        </div>
+        <p class="hint">日期和时刻都可以留空；记不清具体时刻时只填日期即可。</p>
         <div class="row">
           <label>花费<input name="cost" type="number" step="any" placeholder="0"></label>
         </div>
@@ -215,6 +220,7 @@
   <section id="drawer-timeline" class="drawer">
     <div class="drawer-head"><h2>🕒 时间线</h2><button class="drawer-close" title="关闭">✕</button></div>
     <div class="drawer-body">
+      <p class="hint">城市显示在抵达它的交通段前面；拖动条目可手动调整顺序。</p>
       <div id="timeline"></div>
     </div>
   </section>
