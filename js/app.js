@@ -11,6 +11,7 @@ let _editingDiaryId = null;
 let _editingTripId = null, _editingStopId = null, _editingLegId = null, _editingWishId = null;
 let _legDirty = false;   // Leg 编辑表单是否有改动（控制"添加返程"按钮可用）
 let _legAutoArrive = ''; // 出发日期/时刻自动同步到到达端的最近一次值（用于识别到达端是否被手动改过）
+let _legYearFilter = ''; // 交通段城市下拉的年份筛选（'' = 全部年份）
 let _timelineOrders = {}; // tripId -> 手动拖动后的时间线条目顺序（本地 config 持久化）
 
 /* 照片模块状态 */
@@ -209,6 +210,22 @@ function stopVisitShort(s) {
 // 去重后的城市数（多次到访只算一个城市）
 function uniqueCityCount(list) {
   return new Set((list || STOPS).map(s => normCity(s.city || s.nameZh))).size;
+}
+// 到访年份：优先城市日期，缺日期时回退到所属行程的起止年份；返回 'YYYY' 或 ''
+function stopYear(s) {
+  const pick = v => (String(v || '').match(/^(\d{4})/) || [])[1] || '';
+  let y = pick(s && (s.arriveDate || s.leaveDate));
+  if (!y) {
+    const t = s ? TRIPS.find(x => x.id === s.tripId) : null;
+    y = pick(t && (t.dateStart || t.dateEnd));
+  }
+  return y;
+}
+function yearSort(a, b) {
+  if (a === b) return 0;
+  if (!a) return 1;   // 日期未知排最后
+  if (!b) return -1;
+  return Number(b) - Number(a);
 }
 // 交通段端点文字：stop 端点优先显示“城市·第N次·日期”，避免同名城市选错
 function legEndpointLabel(leg, end) {
@@ -501,6 +518,11 @@ function computeLegGeometries() {
 
 function renderMap() {
   if (!_mapReady) return;
+  // 清理播放中断/异常遗留的动画图层：避免地图上出现时间线和列表里没有的“多余连线”
+  if (_playGroup && !(_play && _play.running)) {
+    if (map.hasLayer(_playGroup)) map.removeLayer(_playGroup);
+    _playGroup = null;
+  }
   layerGroup.clearLayers();
   // Leg 连线独立 LayerGroup：省内下钻视图不绘制，返回全国再统一刷新
   if (_legGroup) {
@@ -515,8 +537,11 @@ function renderMap() {
         const { A, B, ctrl, pts } = g;
         const st = legStyle(leg.mode);
         const tp = legTimePopup(leg);
+        const trip = TRIPS.find(t => t.id === leg.tripId);
+        const tripLine = trip ? `🧳 ${esc(trip.title)}` : '⚠️ 未归属行程（不在任何行程的时间线里）';
         L.polyline(pts, { color: st.color, weight: 2, opacity: 0.9 })
-          .bindPopup(`<b>${st.icon} ${st.label}</b><br>${esc(legEndpointLabel(leg, 'from'))} → ${esc(legEndpointLabel(leg, 'to'))}${tp ? '<br>' + tp : ''}<br>花费: ${money(leg.cost)}`)
+          .bindPopup(`<b>${st.icon} ${st.label}</b><br>${esc(legEndpointLabel(leg, 'from'))} → ${esc(legEndpointLabel(leg, 'to'))}${tp ? '<br>' + tp : ''}<br>花费: ${money(leg.cost)}<br>${tripLine}`
+            + `<br><button class="link-btn" data-leg-del="${esc(leg.id)}">删除这段交通</button>`)
           .addTo(_legGroup);
         legArrow(A, B, ctrl, st.color);   // 线段中部方向箭头，指向 to 端
       });
@@ -652,6 +677,24 @@ function bindPopupActions(root) {
         if (pe) bindPopupActions(pe);
       }
       toast('圆点颜色已更新');
+    }));
+  // 地图上的交通连线弹窗：显示所属行程并可删除（用于清理无主/多余的线）
+  root.querySelectorAll('[data-leg-del]').forEach(b =>
+    b.addEventListener('click', async () => {
+      const id = b.dataset.legDel;
+      const leg = LEGS.find(l => l.id === id);
+      if (!leg) return;
+      if (!confirm('确定删除这段交通？此操作不可撤销。')) return;
+      try {
+        if (_editingLegId === id) exitEditMode('leg');
+        await DB.delLeg(id);
+        if (map) map.closePopup();
+        await reload();
+        toast('交通段已删除');
+      } catch (err) {
+        console.error('[footprint] 删除交通段失败：', err);
+        toast('删除失败：' + ((err && (err.message || err.code)) || err));
+      }
     }));
 }
 
@@ -1022,27 +1065,9 @@ function refreshSelects() {
       }
     });
 
-  // Leg 起止城市下拉：常驻城市置顶 + 全部已有城市（跨行程）+ 手动输入兜底
-  const legOpts = legCityOptions();
-  const edLeg = _editingLegId ? LEGS.find(l => l.id === _editingLegId) : null;
-  document.querySelectorAll('#form-leg select[name="fromStopId"], #form-leg select[name="toStopId"]')
-    .forEach(s => {
-      const prev = s.value;
-      const end = s.name === 'fromStopId' ? 'from' : 'to';
-      const raw = edLeg && edLeg[end];
-      s.innerHTML = legOpts;
-      if (prev && s.querySelector(`option[value="${prev}"]`)) s.value = prev;   // 仍有效则保留已选
-      else if (prev && prev !== 'home' && prev !== '__manual') {
-        // 编辑的段引用了已删除的城市：保留原 stopId，别回退成别的城市/空白手动输入
-        const nm = (raw && raw.name) || (edLeg && edLeg[end + 'Name']) || '';
-        const o = document.createElement('option');
-        o.value = prev;
-        o.dataset.name = nm;
-        o.textContent = nm ? `（城市已删除：${nm}）` : '（城市已删除）';
-        s.appendChild(o);
-        s.value = prev;
-      }
-    });
+  // Leg 起止城市下拉：按到访年份分组/筛选 + 保留当前选择
+  refreshLegYearFilter();
+  refreshLegCitySelects();
 
   const dTrip = document.querySelector('#form-diary select[name="tripId"]');
   if (dTrip) dTrip.innerHTML = '<option value="">不关联行程</option>' + tripOptions;
@@ -1054,12 +1079,84 @@ function refreshSelects() {
   // 城市预设改为可搜索选择器（initCityPicker），不再用下拉注入
 }
 
-// Leg 起止城市选项：第一组常驻城市置顶，第二组全部已有城市，末尾手动输入兜底
+// Leg 起止城市选项：常驻城市置顶 → 按到访年份分组（新→旧，未知最后）→ 手动输入
 function legCityOptions() {
-  const stopOpts = STOPS.map(s => `<option value="${s.id}">${esc(stopVisitLabel(s))}（${esc(s.city || s.region || '?')}）</option>`).join('');
+  const year = _legYearFilter;   // '' = 全部，'__unknown__' = 日期未知，其余 = YYYY
+  const pool = STOPS.filter(s => {
+    if (!year) return true;
+    if (year === '__unknown__') return !stopYear(s);
+    return stopYear(s) === year;
+  });
+  const byYear = new Map();
+  pool.forEach(s => {
+    const y = stopYear(s) || '';
+    if (!byYear.has(y)) byYear.set(y, []);
+    byYear.get(y).push(s);
+  });
+  const groups = [...byYear.entries()]
+    .sort((a, b) => yearSort(a[0], b[0]))
+    .map(([y, list]) => {
+      list.sort((a, b) =>
+        (a.arriveDate || a.leaveDate || '9999').localeCompare(b.arriveDate || b.leaveDate || '9999')
+        || String(a.id).localeCompare(String(b.id)));
+      return `<optgroup label="${y ? y + ' 年' : '日期未知'}">`
+        + list.map(s => `<option value="${s.id}">${esc(stopVisitLabel(s))}</option>`).join('')
+        + `</optgroup>`;
+    }).join('');
   return `<optgroup label="🏠 常驻城市"><option value="home">🏠 ${esc(HOME_CITY.name)}（常驻）</option></optgroup>`
-    + `<optgroup label="📍 已有城市">${stopOpts || '<option value="" disabled>暂无城市，可手动输入</option>'}</optgroup>`
+    + (groups || `<optgroup label="📍 已访城市"><option value="" disabled>${year ? year + ' 年暂无城市，可换年份或手动输入' : '暂无城市，可手动输入'}</option></optgroup>`)
     + `<option value="__manual">✍️ 手动输入城市…</option>`;
+}
+
+// 年份筛选下拉：全部年份 + 各年（含到访次数），年份变化时重建交通段城市下拉
+function refreshLegYearFilter() {
+  const sel = document.getElementById('leg-year-filter');
+  if (!sel) return;
+  const counts = new Map();
+  STOPS.forEach(s => {
+    const y = stopYear(s) || '';
+    counts.set(y, (counts.get(y) || 0) + 1);
+  });
+  const years = [...counts.keys()].sort(yearSort);
+  if (_legYearFilter === '__unknown__') { if (!counts.has('')) _legYearFilter = ''; }
+  else if (_legYearFilter && !counts.has(_legYearFilter)) _legYearFilter = '';
+  sel.innerHTML = `<option value="">全部年份（${STOPS.length}）</option>`
+    + years.map(y => `<option value="${y || '__unknown__'}">${y ? y + ' 年' : '日期未知'}（${counts.get(y)}）</option>`).join('');
+  sel.value = _legYearFilter;
+}
+
+// 重建交通段起止城市下拉；被年份筛选排除的已选城市放到“当前选择”里保留，不清空
+function refreshLegCitySelects() {
+  const f = document.getElementById('form-leg');
+  if (!f) return;
+  const edLeg = _editingLegId ? LEGS.find(l => l.id === _editingLegId) : null;
+  const opts = legCityOptions();
+  [['fromStopId', 'from'], ['toStopId', 'to']].forEach(([name, end]) => {
+    const s = f[name];
+    if (!s) return;
+    const prev = s.value;
+    s.innerHTML = opts;
+    if (prev && s.querySelector(`option[value="${prev}"]`)) { s.value = prev; return; }
+    if (!prev || prev === 'home' || prev === '__manual') return;
+    const stop = stopById(prev);
+    const og = document.createElement('optgroup');
+    og.label = '当前选择';
+    const o = document.createElement('option');
+    o.value = prev;
+    if (stop) {
+      o.textContent = stopVisitLabel(stop);
+    } else {
+      // 编辑的段引用了已删除的城市：保留原 stopId，别回退成别的城市/空白手动输入
+      const raw = edLeg && edLeg[end];
+      const nm = (raw && raw.name) || (edLeg && edLeg[end + 'Name']) || '';
+      o.dataset.name = nm;
+      o.textContent = nm ? `（城市已删除：${nm}）` : '（城市已删除）';
+    }
+    og.appendChild(o);
+    s.appendChild(og);
+    s.value = prev;
+  });
+  updateLegManualVisibility();
 }
 
 // 手动输入区显隐：选中"手动输入"时显示对应端的名称/经纬度填写框
@@ -1105,8 +1202,11 @@ function syncReturnBtn() {
 /* ===== 已有数据：按行程折叠（城市/到访 + 交通段收在行程下面） ===== */
 const TRIP_EXPAND_PREFIX = 'footprint-trip-expanded:';
 function isTripExpanded(id) {
-  try { return localStorage.getItem(TRIP_EXPAND_PREFIX + id) === '1'; }
-  catch (e) { return false; }
+  try {
+    const v = localStorage.getItem(TRIP_EXPAND_PREFIX + id);
+    if (v === null) return id === '__orphan__';   // 未归属数据默认展开，避免“地图上有线但列表里找不到”
+    return v === '1';
+  } catch (e) { return false; }
 }
 function setTripExpanded(id, expanded) {
   try { localStorage.setItem(TRIP_EXPAND_PREFIX + id, expanded ? '1' : '0'); }
@@ -2133,35 +2233,41 @@ function playLoop(now) {
   const st = _play;
   if (!st || !st.running) return;                       // 退出后不留后台空转
   if (st.paused) { st.raf = 0; return; }                // 暂停后可能在途的一帧：不再续订
-  const dt = Math.min(100, now - st.last); st.last = now;
-  st.t += dt * st.speed;                                // 倍率作用于全局时长
-  const phase = st.phases.find(p => st.t < p.end) || st.phases[st.phases.length - 1];
-  const key = phase.type + ':' + phase.i;
-  if (st.phaseKey !== key) {                            // 进入新相位：一次性触发
-    st.phaseKey = key;
-    enterPlayPhase(phase);
-  }
-  const span = phase.end - phase.start;
-  const tp = Math.min(1, Math.max(0, (st.t - phase.start) / span));
-  const te = easeInOutCubic(tp);
-  if (phase.type === 'seg') tickTileUpdates(now);       // 瓦片更新限流（5 次/秒）
-  if (phase.type === 'seg' && st.seg && !st.seg.noMap) { // 路径生长 + 光点 + 相机平移（缩放固定）
-    const seg = st.seg, pts = seg.pts;
-    const head = pathPoint(pts, te);
-    if (st.segLine) {
-      const fi = te * (pts.length - 1), i0 = Math.floor(fi);
-      st.segLine.setLatLngs(pts.slice(0, i0 + 1).concat([head]));   // 线条像画出来一样连续生长
+  try {
+    const dt = Math.min(100, now - st.last); st.last = now;
+    st.t += dt * st.speed;                                // 倍率作用于全局时长
+    const phase = st.phases.find(p => st.t < p.end) || st.phases[st.phases.length - 1];
+    const key = phase.type + ':' + phase.i;
+    if (st.phaseKey !== key) {                            // 进入新相位：一次性触发
+      st.phaseKey = key;
+      enterPlayPhase(phase);
     }
-    if (st.runner) st.runner.setLatLng(head);                       // 光点连续移动不瞬移
-    // 镜头略微前瞻，让行进方向上的线更早进入视野，而不是死钉在光点上
-    // 3% 足够看出线条走向，又不会把刚出发的常驻地/起点挤出屏幕
-    const lookT = te + 0.03 * (1 - te);
-    playCamera(pathPoint(pts, lookT), st.zoom);
-    if (te >= 1 && !st.arrowShown) { st.arrowShown = true; addPlayArrow(seg); }   // 生长完成后箭头淡入
+    const span = phase.end - phase.start;
+    const tp = Math.min(1, Math.max(0, (st.t - phase.start) / span));
+    const te = easeInOutCubic(tp);
+    if (phase.type === 'seg') tickTileUpdates(now);       // 瓦片更新限流（5 次/秒）
+    if (phase.type === 'seg' && st.seg && !st.seg.noMap) { // 路径生长 + 光点 + 相机平移（缩放固定）
+      const seg = st.seg, pts = seg.pts;
+      const head = pathPoint(pts, te);
+      if (st.segLine) {
+        const fi = te * (pts.length - 1), i0 = Math.floor(fi);
+        st.segLine.setLatLngs(pts.slice(0, i0 + 1).concat([head]));   // 线条像画出来一样连续生长
+      }
+      if (st.runner) st.runner.setLatLng(head);                       // 光点连续移动不瞬移
+      // 镜头略微前瞻，让行进方向上的线更早进入视野，而不是死钉在光点上
+      // 3% 足够看出线条走向，又不会把刚出发的常驻地/起点挤出屏幕
+      const lookT = te + 0.03 * (1 - te);
+      playCamera(pathPoint(pts, lookT), st.zoom);
+      if (te >= 1 && !st.arrowShown) { st.arrowShown = true; addPlayArrow(seg); }   // 生长完成后箭头淡入
+    }
+    updatePlayFill();
+    if (st.t >= st.total) { st.naturalEnd = true; finishPlay(); return; }
+    st.raf = requestAnimationFrame(playLoop);
+  } catch (err) {
+    // 任何绘制异常都不能把动画图层留在图上（否则会出现数据里没有的多余连线）
+    console.error('[footprint] 播放中断：', err);
+    finishPlay();
   }
-  updatePlayFill();
-  if (st.t >= st.total) { st.naturalEnd = true; finishPlay(); return; }
-  st.raf = requestAnimationFrame(playLoop);
 }
 // 段生长完成：中点方向箭头淡入（颜色随交通方式）
 function addPlayArrow(seg) {
@@ -2293,14 +2399,17 @@ function startPlay(tripId) {
 // 收尾：清除播放图层组与光点，恢复地图交互与业务图层；rAF 全部取消
 function finishPlay() {
   const st = _play;
+  if (st) st.running = false;   // 先标记停止，后续异常也不会留下可播放状态
   if (st && st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
   if (map && map.stop) map.stop();
+  if (_playGroup) {   // 先清动画图层，避免收尾异常时地图残留多余连线
+    if (map && map.hasLayer(_playGroup)) map.removeLayer(_playGroup);
+    _playGroup = null;
+  }
   // 自然结束时确保落在完整行程视野（flyTo 偶有最后一帧未走完）
   if (st && st.naturalEnd && st.endCenter && st.endTarget != null) {
-    map.setView(st.endCenter, st.endTarget, { animate: false });
+    try { map.setView(st.endCenter, st.endTarget, { animate: false }); } catch (e) { /* 忽略 */ }
   }
-  if (st) st.running = false;
-  if (_playGroup) { map.removeLayer(_playGroup); _playGroup = null; }
   restoreTileUpdates();
   if (st && st.hidden) {
     st.hidden.forEach(layer => { if (layer && !map.hasLayer(layer)) map.addLayer(layer); });
@@ -2622,6 +2731,11 @@ function bindForms() {
   const legForm = document.getElementById('form-leg');
   legForm.fromStopId.addEventListener('change', updateLegManualVisibility);
   legForm.toStopId.addEventListener('change', updateLegManualVisibility);
+  const legYearSel = document.getElementById('leg-year-filter');
+  if (legYearSel) legYearSel.addEventListener('change', (e) => {
+    _legYearFilter = e.target.value;
+    refreshLegCitySelects();
+  });
   // 编辑态任一字段改动 → "添加返程"变为可点
   legForm.addEventListener('input', () => { if (_editingLegId) { _legDirty = true; syncReturnBtn(); } });
   legForm.addEventListener('change', () => { if (_editingLegId) { _legDirty = true; syncReturnBtn(); } });
