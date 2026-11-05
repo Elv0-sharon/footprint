@@ -225,7 +225,7 @@
   <section id="drawer-timeline" class="drawer">
     <div class="drawer-head"><h2>🕒 时间线</h2><button class="drawer-close" title="关闭">✕</button></div>
     <div class="drawer-body">
-      <p class="hint">城市显示在抵达它的交通段前面；拖动条目可手动调整顺序，轨迹播放会按这里的排列执行。</p>
+      <p class="hint">城市显示在抵达它的交通段前面。电脑上可拖动条目排序；手机上点条目右侧的 ▲▼ 调整顺序。轨迹播放会按这里的排列执行。</p>
       <div id="timeline"></div>
     </div>
   </section>
@@ -282,7 +282,7 @@
           <button id="btn-export" class="primary">导出全部 JSON</button>
           <label class="file-btn primary">
             从 JSON 导入
-            <input type="file" id="file-import" accept="application/json,.json" hidden>
+            <input type="file" id="file-import" accept="application/json,.json" class="visually-hidden">
           </label>
           <button id="btn-sync-up">⬆️ 上传本机数据到云端</button>
           <button id="btn-repair">🩹 修复错位城市（按交通段归位）</button>
@@ -345,7 +345,7 @@
       <div id="play-stats" class="stats-bar"></div>
       <button id="btn-start-play" class="primary">▶ 开始播放</button>
       <p class="hint" id="play-empty" hidden>暂无行程，先去「录入」创建吧。</p>
-      <p class="hint">有几段交通就播几段：按「时间线」里的排列顺序逐段播放（拖动时间线条目即可调整），重复城市、往返也照播；缺坐标的段只显示状态、不画线。不会自动补常驻地往返。播放不修改任何数据。</p>
+      <p class="hint">有几段交通就播几段：按「时间线」里的排列顺序逐段播放（电脑拖动条目、手机点 ▲▼ 即可调整），重复城市、往返也照播；缺坐标的段只显示状态、不画线。不会自动补常驻地往返。播放不修改任何数据。</p>
     </div>
   </section>
 
@@ -354,11 +354,14 @@
     <div class="drawer-head"><h2 id="photo-drawer-title">📷 城市照片</h2><button id="photos-close" class="drawer-close" title="关闭照片抽屉" aria-label="关闭照片抽屉">✕</button></div>
     <div class="drawer-body">
       <div class="photo-toolbar">
-        <label class="file-btn primary">添加照片（可多选 / 拖入）
-          <input type="file" id="photo-input" accept="image/*" multiple hidden>
+        <label class="file-btn primary">🖼️ 从相册选择（可多选）
+          <input type="file" id="photo-input" accept="image/*" multiple class="visually-hidden">
+        </label>
+        <label class="file-btn primary mobile-only">📸 拍照添加
+          <input type="file" id="photo-camera-input" accept="image/*" capture="environment" class="visually-hidden">
         </label>
         <button type="button" id="photo-select-toggle" class="ghost">☑️ 选择删除</button>
-        <span class="hint">可一次选择多张；自动压缩：长边 1600px / JPEG 0.8，登录后同步云端</span>
+        <span class="hint">电脑可拖入；手机上从相册可一次选多张（部分浏览器只允许单选，重复点按即可继续添加）。自动压缩：长边 1600px / JPEG 0.8，登录后同步云端</span>
         <span class="hint" id="photo-progress"></span>
         <span class="hint" id="photo-count"></span>
       </div>

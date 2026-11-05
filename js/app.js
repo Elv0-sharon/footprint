@@ -664,6 +664,17 @@ function visitsPopupHtml(list) {
 function bindPopupActions(root) {
   root.querySelectorAll('[data-photos]').forEach(b =>
     b.addEventListener('click', () => openPhotoDrawer(b.dataset.photos)));
+  // 省份弹窗：进入省内地图（手机点按，电脑也可双击省份）
+  root.querySelectorAll('[data-drill]').forEach(b =>
+    b.addEventListener('click', () => {
+      const adcode = b.dataset.drill;
+      const name = b.dataset.drillName || '';
+      const layer = provinceLayer && typeof provinceLayer.getLayers === 'function'
+        ? provinceLayer.getLayers().find(l => String((l.feature && l.feature.properties && l.feature.properties.adcode) || '') === String(adcode))
+        : null;
+      if (map) map.closePopup();
+      drillToProvince(adcode, name, layer ? layer.getBounds() : null);
+    }));
   root.querySelectorAll('[data-stopcolor]').forEach(b =>
     b.addEventListener('click', async () => {
       const st = STOPS.find(x => x.id === b.dataset.stopId);
@@ -777,7 +788,11 @@ function renderProvincesNational() {
     },
     onEachFeature: (feature, layer) => {
       const name = (feature.properties && feature.properties.name) || '';
-      layer.bindPopup(`<b>${esc(name)}</b><br>状态：${provinceHighlighted(name) ? '🟢 已点亮' : '⚪ 未点亮'}<br><span class="sub">双击进入省内地图</span>`);
+      const adcode = feature.properties && feature.properties.adcode;
+      // 手机上没有“双击”，弹窗里给一个明确的进入按钮
+      layer.bindPopup(`<b>${esc(name)}</b><br>状态：${provinceHighlighted(name) ? '🟢 已点亮' : '⚪ 未点亮'}`
+        + (adcode ? `<br><button class="link-btn" data-drill="${esc(adcode)}" data-drill-name="${esc(name)}">🧭 进入省内地图</button>` : '')
+        + `<br><span class="sub">电脑上也可以双击省份进入</span>`);
       layer.on({
         click: (e) => { if (_highlightMode) { toggleProvince(name); e.target.closePopup(); } },
         mouseover: (e) => {
@@ -960,6 +975,9 @@ function timelineTripItems(trip) {
 function renderTimeline() {
   const el = document.getElementById('timeline');
   if (!TRIPS.length) { el.innerHTML = '<p class="empty">暂无行程，去「录入」添加吧。</p>'; return; }
+  // 触屏设备没有悬停/拖放：去掉 draggable，避免长按拖出半透明残影，改用 ▲▼ 按钮
+  const coarse = !!(window.matchMedia && window.matchMedia('(hover: none) and (pointer: coarse)').matches);
+  const dragAttrs = coarse ? '' : ' draggable="true" title="拖动可调整顺序"';
   const trips = [...TRIPS].sort((a, b) => (b.dateStart || '').localeCompare(a.dateStart || ''));
   el.innerHTML = trips.map(trip => {
     const items = timelineTripItems(trip);
@@ -974,7 +992,11 @@ function renderTimeline() {
       items.forEach(it => { if (!seen.has(it.key)) ordered.push(it); });
     }
     const body = ordered.length
-      ? ordered.map(i => `<div class="tl-item" draggable="true" data-key="${i.key}" title="拖动可调整顺序">${i.html}</div>`).join('')
+      ? ordered.map(i => `<div class="tl-item"${dragAttrs} data-key="${i.key}">${i.html}`
+          + `<div class="tl-moves">`
+          + `<button type="button" class="tl-move" draggable="false" data-tl-move="-1" aria-label="上移" title="上移">▲</button>`
+          + `<button type="button" class="tl-move" draggable="false" data-tl-move="1" aria-label="下移" title="下移">▼</button>`
+          + `</div></div>`).join('')
       : '<p class="empty">该行程暂无交通段；城市会显示在抵达它的交通段前面。</p>';
     const tripStops = STOPS.filter(s => s.tripId === trip.id);
     const uniqCities = uniqueCityCount(tripStops);
@@ -1027,22 +1049,45 @@ function bindTimelineDrag() {
     item.classList.remove('dragging');
     clearTimelineDropMarks();
     _tlDrag = null;
-    const keys = [...group.querySelectorAll(':scope > .tl-item')].map(x => x.dataset.key).filter(Boolean);
-    if (!keys.length) return;
-    _timelineOrders[tripId] = keys;
-    try {
-      await DB.putConfig({ key: 'timelineOrder:' + tripId, value: keys });
-      toast('时间线顺序已保存');
-    } catch (err) {
-      console.warn('[footprint] 时间线顺序保存失败：', err);
-      toast('顺序保存失败，刷新后会恢复');
-    }
+    await saveTimelineOrder(group, tripId);
+  });
+  // 触屏设备不支持 HTML5 拖放：用每条右侧的 ▲▼ 按钮上下移动
+  el.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-tl-move]');
+    if (!btn) return;
+    const item = btn.closest('.tl-item');
+    const group = item && item.closest('.trip-group');
+    if (!item || !group) return;
+    e.preventDefault();
+    const dir = Number(btn.dataset.tlMove);
+    const sib = dir < 0 ? item.previousElementSibling : item.nextElementSibling;
+    if (!sib || !sib.classList.contains('tl-item')) return;
+    if (dir < 0) group.insertBefore(item, sib);   // 上移：插到前一条之前
+    else group.insertBefore(sib, item);           // 下移：把后一条插到当前条目之前
+    await saveTimelineOrder(group, group.dataset.tripId);
+    // 条目移动后保持按钮可连续点按，滚动到可见位置
+    if (item.scrollIntoView) item.scrollIntoView({ block: 'nearest' });
   });
   el.addEventListener('dragend', () => {
     if (_tlDrag && _tlDrag.item) _tlDrag.item.classList.remove('dragging');
     clearTimelineDropMarks();
     _tlDrag = null;
   });
+}
+
+// 把当前行程分组里的排列顺序写入本机 config（拖放与 ▲▼ 共用）
+async function saveTimelineOrder(group, tripId) {
+  if (!group || !tripId) return;
+  const keys = [...group.querySelectorAll(':scope > .tl-item')].map(x => x.dataset.key).filter(Boolean);
+  if (!keys.length) return;
+  _timelineOrders[tripId] = keys;
+  try {
+    await DB.putConfig({ key: 'timelineOrder:' + tripId, value: keys });
+    toast('时间线顺序已保存');
+  } catch (err) {
+    console.warn('[footprint] 时间线顺序保存失败：', err);
+    toast('顺序保存失败，刷新后会恢复');
+  }
 }
 
 /* ===== 录入下拉 & 数据列表 ===== */
@@ -2467,10 +2512,15 @@ function bindPlay() {
 const DRAWER_NAMES = ['entry', 'timeline', 'diary', 'photos', 'settings', 'wishlist', 'play'];
 // 全局唯一打开状态：任意时刻至多一个抽屉打开，_openDrawer 记录其名字（null = 全部关闭）
 let _openDrawer = null;
+// 手机端抽屉占满全宽，会盖住左侧工具栏：用 body 类让 CSS 收起工具栏
+function syncDrawerBodyClass() {
+  document.body.classList.toggle('drawer-open', !!document.querySelector('.drawer.open'));
+}
 // 统一关闭函数：只收起指定抽屉（移除 .open，无残留容器），照片抽屉连带关灯箱并清空容器
 function closeDrawer(name) {
   const d = document.getElementById('drawer-' + name);
   if (d) d.classList.remove('open');
+  syncDrawerBodyClass();
   const tb = document.querySelector('.tool-btn.active[data-drawer="' + name + '"]');
   if (tb) tb.classList.remove('active');
   if (name === 'photos') {
@@ -2498,6 +2548,7 @@ function openDrawer(name) {
   const d = document.getElementById('drawer-' + name);
   if (!d) return;
   d.classList.add('open');
+  syncDrawerBodyClass();
   const tb = document.querySelector('.tool-btn[data-drawer="' + name + '"]');
   if (tb) tb.classList.add('active');
   _openDrawer = name;
@@ -3315,7 +3366,10 @@ async function addPhotoFiles(fileList) {
   const all = [...(fileList || [])];
   if (!all.length) return;
   if (_photoUploading) { toast('正在添加照片，请稍候'); return; }
-  const images = all.filter(f => f.type && f.type.startsWith('image/'));
+  // 部分手机文件管理器给不出 MIME（type 为空），退回按扩展名判断，避免所选照片被全部丢弃
+  const IMG_EXT = /\.(jpe?g|png|gif|webp|bmp|heic|heif|avif)$/i;
+  const isImage = f => (f.type && f.type.startsWith('image/')) || (!f.type && IMG_EXT.test(f.name || ''));
+  const images = all.filter(isImage);
   if (!images.length) { toast('未选择图片文件'); return; }
   // 单城市照片上限 30 张：已达上限不追加，超出部分截断并提示
   const jobStopId = _photoStopId;
@@ -3328,10 +3382,10 @@ async function addPhotoFiles(fileList) {
 
   _photoUploading = true;
   const inputEl = document.getElementById('photo-input');
+  const cameraEl = document.getElementById('photo-camera-input');
   const progressEl = document.getElementById('photo-progress');
-  const fileBtn = inputEl && inputEl.closest('.file-btn');
-  if (inputEl) inputEl.disabled = true;
-  if (fileBtn) fileBtn.classList.add('disabled');
+  const inputs = [inputEl, cameraEl].filter(Boolean);
+  inputs.forEach(el => { el.disabled = true; const lb = el.closest('.file-btn'); if (lb) lb.classList.add('disabled'); });
 
   let ok = 0, fail = 0, done = 0;
   const updateProgress = () => {
@@ -3339,7 +3393,9 @@ async function addPhotoFiles(fileList) {
   };
   updateProgress();
 
-  const CONCURRENCY = 3;
+  // 手机内存小：大图解码占内存，降到 2 并发，避免多张原图同时解码把页面挤崩
+  const smallScreen = window.matchMedia && window.matchMedia('(max-width: 600px)').matches;
+  const CONCURRENCY = smallScreen ? 2 : 3;
   const baseTs = Date.now();
   let cursor = 0;
   async function worker() {
@@ -3369,8 +3425,7 @@ async function addPhotoFiles(fileList) {
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, total) }, worker));
   } finally {
     _photoUploading = false;
-    if (inputEl) inputEl.disabled = false;
-    if (fileBtn) fileBtn.classList.remove('disabled');
+    inputs.forEach(el => { el.disabled = false; const lb = el.closest('.file-btn'); if (lb) lb.classList.remove('disabled'); });
     if (progressEl) progressEl.textContent = '';
   }
 
@@ -3383,12 +3438,15 @@ async function addPhotoFiles(fileList) {
 }
 
 function bindPhotos() {
-  // 多选上传
-  document.getElementById('photo-input').addEventListener('change', (e) => {
+  // 相册多选 / 手机拍照都走同一个添加流程
+  const onPhotoPicked = (e) => {
     const files = [...e.target.files];
-    e.target.value = '';
+    e.target.value = '';   // 允许连续选同一批照片
     addPhotoFiles(files);
-  });
+  };
+  document.getElementById('photo-input').addEventListener('change', onPhotoPicked);
+  const cameraInput = document.getElementById('photo-camera-input');
+  if (cameraInput) cameraInput.addEventListener('change', onPhotoPicked);
 
   // 拖拽多张照片到照片面板即可追加
   const photoBody = document.querySelector('#drawer-photos .drawer-body');

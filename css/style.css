@@ -215,7 +215,14 @@ button.small.ghost {
   background: var(--btn-bg); color: var(--text); border: 1px solid var(--btn-border);
 }
 button.small.ghost:hover { background: var(--btn-hover); }
-.file-btn { display: inline-flex; align-items: center; }
+/* label 版按钮（文件选择入口）：与 button.primary / button.ghost 同样外观 */
+.file-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 10px 16px; border-radius: 8px; font-size: 14px; cursor: pointer;
+  background: var(--btn-bg); color: var(--text); border: 1px solid var(--btn-border);
+}
+.file-btn.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.file-btn:hover { filter: brightness(.96); }
 
 /* 心情日记 */
 .mood-row { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -246,7 +253,17 @@ button.small.ghost:hover { background: var(--btn-hover); }
 .tl-item.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 .tl-item.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 .tl-icon { font-size: 18px; flex: 0 0 24px; text-align: center; }
-.tl-body { font-size: 14px; }
+.tl-body { font-size: 14px; flex: 1 1 auto; min-width: 0; }
+/* 触屏没有 HTML5 拖放：每条右侧给 ▲▼ 按钮，手机也能调顺序 */
+.tl-moves { display: flex; flex-direction: column; gap: 2px; flex: 0 0 auto; align-self: center; }
+.tl-move {
+  width: 30px; height: 22px; padding: 0; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; color: var(--muted); cursor: pointer;
+  background: var(--btn-bg); border: 1px solid var(--btn-border); border-radius: 6px;
+}
+.tl-move:hover { background: var(--btn-hover); color: var(--text); }
+.tl-move:active { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 .tl-body .sub { color: var(--muted); font-size: 12px; }
 .empty { color: var(--muted); font-style: italic; padding: 20px 0; }
 
@@ -694,4 +711,35 @@ body.auth-lock > *:not(#auth-screen) { display: none !important; }
   .card .row label { min-width: 0; }
   .drawer { width: 100vw; }
   .photo-grid { grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); }
+}
+
+/* ===== 手机 / 触屏适配 ===== */
+/* 视觉隐藏但保留在 DOM 里：部分手机 WebView（微信 X5 等）对 display:none 的
+   file input 不弹选择器，这里改成裁剪隐藏 */
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%);
+  white-space: nowrap;
+}
+/* 仅手机显示（拍照按钮在电脑上没意义） */
+.mobile-only { display: none !important; }
+
+@media (max-width: 600px) {
+  /* 手机浏览器地址栏会伸缩：用动态视口高度，避免底部被截断 */
+  #map-wrap { height: calc(100dvh - 44px); }
+  .drawer { height: 100dvh; }
+  /* 抽屉在手机上占满全宽，工具栏会压在表单上：抽屉打开时收起工具栏，用抽屉右上角 ✕ 关闭 */
+  body.drawer-open .toolbar { display: none; }
+  .mobile-only { display: inline-flex !important; }
+  .map-legend .item { padding: 4px 2px; }
+  /* iOS 聚焦小于 16px 的输入框会自动放大页面 */
+  .card input, .card select, .card textarea,
+  .city-picker input, .lb-form input, .lb-form textarea,
+  .auth-card input, .play-bar select { font-size: 16px; }
+  /* 触屏点击区域加大 */
+  button.small, .file-btn { min-height: 36px; padding: 8px 12px; }
+  .link-btn { min-height: 34px; padding: 8px 12px; font-size: 13px; }
+  .drawer-close { min-width: 40px; min-height: 40px; }
+  .tl-move { width: 36px; height: 30px; font-size: 12px; }
 }
